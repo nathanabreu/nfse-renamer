@@ -46,20 +46,49 @@ def load_config():
     CONFIG.setdefault("FIX_PERMISSIONS_ON_CYCLE", "true")  # ajustar permissões a cada ciclo
     CONFIG.setdefault("RENAME_IN_PLACE", "false")  # renomear na própria pasta
     
+    # Verifica modo RENAME_IN_PLACE
+    rename_in_place = CONFIG.get("RENAME_IN_PLACE", "false").lower() in ("true", "1", "yes")
+    
+    # INPUT_DIR sempre é necessário
+    dirs_to_manage = ["INPUT_DIR"]
+    
+    # OUTPUT_DIR e REJECT_DIR só são necessários se não estiver em modo RENAME_IN_PLACE
+    if not rename_in_place:
+        dirs_to_manage.extend(["OUTPUT_DIR", "REJECT_DIR"])
+    
     # Criar diretórios se não existirem e ajustar permissões
-    for dir_key in ["INPUT_DIR", "OUTPUT_DIR", "REJECT_DIR"]:
+    for dir_key in dirs_to_manage:
         dir_path = CONFIG[dir_key]
-        os.makedirs(dir_path, exist_ok=True)
-        # Ajusta permissões do diretório
+        
+        # Verifica se diretório já existe
+        if not os.path.exists(dir_path):
+            try:
+                os.makedirs(dir_path, exist_ok=True)
+                logging.debug(f"Diretório criado: {dir_path}")
+            except Exception as e:
+                logging.warning(f"Erro ao criar diretório {dir_path}: {e}")
+                continue
+        else:
+            logging.debug(f"Diretório já existe: {dir_path}")
+        
+        # Ajusta permissões do diretório (seja criado agora ou já existente)
         try:
             dir_permissions = int(CONFIG["DIR_PERMISSIONS"], 8)
             os.chmod(dir_path, dir_permissions)
+            logging.debug(f"Permissões ajustadas para {dir_path}: {CONFIG['DIR_PERMISSIONS']}")
         except Exception as e:
             logging.warning(f"Erro ao ajustar permissões do diretório {dir_path}: {e}")
     
     # Criar diretório de logs
     log_dir = os.path.dirname(CONFIG["LOG_FILE"])
-    os.makedirs(log_dir, exist_ok=True)
+    if not os.path.exists(log_dir):
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            logging.debug(f"Diretório de logs criado: {log_dir}")
+        except Exception as e:
+            logging.warning(f"Erro ao criar diretório de logs {log_dir}: {e}")
+    else:
+        logging.debug(f"Diretório de logs já existe: {log_dir}")
 
 def setup_logging():
     """Configura sistema de logging"""
@@ -160,14 +189,25 @@ def fix_all_permissions():
     if CONFIG.get("FIX_PERMISSIONS_ON_CYCLE", "true").lower() not in ("true", "1", "yes"):
         return
     
-    # Ajusta permissões dos diretórios
-    set_directory_permissions(CONFIG["INPUT_DIR"])
-    set_directory_permissions(CONFIG["OUTPUT_DIR"])
-    set_directory_permissions(CONFIG["REJECT_DIR"])
+    rename_in_place = CONFIG.get("RENAME_IN_PLACE", "false").lower() in ("true", "1", "yes")
     
-    # Ajusta permissões dos arquivos PDF
-    fix_permissions_in_directory(CONFIG["OUTPUT_DIR"])
-    fix_permissions_in_directory(CONFIG["REJECT_DIR"])
+    # Ajusta permissões dos diretórios (apenas se existirem)
+    if os.path.exists(CONFIG["INPUT_DIR"]):
+        set_directory_permissions(CONFIG["INPUT_DIR"])
+    
+    # OUTPUT_DIR e REJECT_DIR só são usados se não estiver em modo RENAME_IN_PLACE
+    if not rename_in_place:
+        if os.path.exists(CONFIG["OUTPUT_DIR"]):
+            set_directory_permissions(CONFIG["OUTPUT_DIR"])
+            fix_permissions_in_directory(CONFIG["OUTPUT_DIR"])
+        
+        if os.path.exists(CONFIG["REJECT_DIR"]):
+            set_directory_permissions(CONFIG["REJECT_DIR"])
+            fix_permissions_in_directory(CONFIG["REJECT_DIR"])
+    else:
+        # No modo RENAME_IN_PLACE, ajusta permissões apenas em INPUT_DIR
+        if os.path.exists(CONFIG["INPUT_DIR"]):
+            fix_permissions_in_directory(CONFIG["INPUT_DIR"])
 
 def process_pdf(path, retry_count=0):
     """
@@ -363,11 +403,19 @@ def main():
     logging.info(f"RENAME_IN_PLACE: {CONFIG['RENAME_IN_PLACE']}")
     logging.info("=" * 60)
     
-    # Ajusta permissões dos diretórios na inicialização
+    # Ajusta permissões dos diretórios na inicialização (apenas se existirem)
     logging.info("Ajustando permissões dos diretórios...")
-    set_directory_permissions(CONFIG["INPUT_DIR"])
-    set_directory_permissions(CONFIG["OUTPUT_DIR"])
-    set_directory_permissions(CONFIG["REJECT_DIR"])
+    rename_in_place = CONFIG.get("RENAME_IN_PLACE", "false").lower() in ("true", "1", "yes")
+    
+    if os.path.exists(CONFIG["INPUT_DIR"]):
+        set_directory_permissions(CONFIG["INPUT_DIR"])
+    
+    # OUTPUT_DIR e REJECT_DIR só são usados se não estiver em modo RENAME_IN_PLACE
+    if not rename_in_place:
+        if os.path.exists(CONFIG["OUTPUT_DIR"]):
+            set_directory_permissions(CONFIG["OUTPUT_DIR"])
+        if os.path.exists(CONFIG["REJECT_DIR"]):
+            set_directory_permissions(CONFIG["REJECT_DIR"])
     
     use_polling = CONFIG["USE_POLLING"].lower() in ("true", "1", "yes")
     polling_interval = int(CONFIG["POLLING_INTERVAL"])

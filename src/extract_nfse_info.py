@@ -30,5 +30,6 @@ def extract_nfse_info(pdf_path):
         raise ValueError("Série não encontrada.")
     serie_num = serie.group(1)
 
-    return f"nfse_{cnpj}_{rps_num}_{nfse_num}_{serie_num}"
+    # Garante que o prefixo "nfse" seja sempre minúsculo
+    return f"nfse_{cnpj}_{rps_num}_{nfse_num}_{serie_num}".lower()
 

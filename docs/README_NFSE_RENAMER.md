@@ -4,12 +4,28 @@ Serviço Linux em Python para extração automática de metadados de NFSe (Prefe
 
 O objetivo é garantir que todos os PDFs entregues ao conector fiscal sigam o padrão definido pelo cliente:
 
+```
 nfse_<CNPJ_EMITENTE>_<NUM_RPS>_<NUM_NFSE>_<SERIE>.pdf
+```
 
-
-Exemplo real extraído do PDF:
-
+**Exemplo real extraído do PDF:**
+```
 nfse_02886427002450_146345_8_1.pdf
+```
+
+## 📋 Modos de Operação
+
+O serviço oferece dois modos principais de funcionamento:
+
+1. **Modo de Monitoramento**:
+   - **Watchdog** (padrão): Detecta novos arquivos imediatamente via inotify
+   - **Polling**: Verifica diretório em intervalos configuráveis
+
+2. **Modo de Processamento**:
+   - **Movimentação** (padrão): Move arquivos para pastas `processed` ou `reject`
+   - **Renomear no lugar**: Renomeia arquivos na própria pasta `inbound` sem mover
+
+Consulte a seção [Configuração Parametrizada](#-5-configuração-parametrizada-configenv) para detalhes sobre como configurar cada modo.
 
 ## ✔️ 1. Arquitetura da Solução
 
@@ -33,9 +49,13 @@ A solução é composta por quatro módulos principais:
 
 3. **Dispatcher com Retry Logic**
 
-   Movimenta arquivos para:
-   - `/processed` → sucesso
-   - `/reject` → erro de leitura/extração após todas as tentativas
+   Gerencia a movimentação/renomeação de arquivos:
+   - **Modo padrão** (`RENAME_IN_PLACE="false"`):
+     - `/processed` → sucesso
+     - `/reject` → erro de leitura/extração após todas as tentativas
+   - **Modo renomear no lugar** (`RENAME_IN_PLACE="true"`):
+     - Arquivo é renomeado na própria pasta INPUT_DIR
+     - Em caso de erro, arquivo permanece em INPUT_DIR
    
    Inclui sistema robusto de retry, validação de arquivos e tratamento de erros.
 
@@ -48,10 +68,13 @@ A solução é composta por quatro módulos principais:
    - Política de restart configurável
 
 ## ✔️ 2. Estrutura de Diretórios
+
+**Nota**: Os caminhos dos diretórios de trabalho (`INPUT_DIR`, `OUTPUT_DIR`, `REJECT_DIR`) são configuráveis via `config.env` e podem estar em qualquer local do servidor. A estrutura abaixo mostra apenas o padrão de instalação.
+
 ```
 /opt/nfse-renamer/
 │
-├── config.env               # Configurações parametrizadas
+├── config.env               # Configurações parametrizadas (define caminhos dos diretórios)
 ├── nfse-renamer.service     # Arquivo systemd
 │
 ├── src/                     # ✅ Todo o código-fonte do serviço
@@ -63,20 +86,38 @@ A solução é composta por quatro módulos principais:
 ├── docs/                    # Documentação
 │   └── README_NFSE_RENAMER.md
 │
-├── files/                   # Diretórios de trabalho
-│   ├── inbound/             # PDFs de entrada (monitorado)
-│   ├── processed/           # PDFs processados com sucesso
-│   └── reject/              # PDFs rejeitados
+├── files/                   # Diretórios de trabalho (caminhos configuráveis em config.env)
+│   ├── inbound/             # PDFs de entrada (monitorado) - caminho definido por INPUT_DIR
+│   ├── processed/           # PDFs processados (caminho definido por OUTPUT_DIR, opcional se RENAME_IN_PLACE="true")
+│   └── reject/              # PDFs rejeitados (caminho definido por REJECT_DIR, opcional se RENAME_IN_PLACE="true")
 │
-└── logs/                    # Arquivos de log
+└── logs/                    # Arquivos de log (caminho definido por LOG_FILE)
     └── nfse_renamer.log
 ```
 
+**Importante**: 
+- Os diretórios `INPUT_DIR`, `OUTPUT_DIR` e `REJECT_DIR` podem estar em qualquer caminho do servidor
+- Configure os caminhos desejados no arquivo `config.env`
+- O serviço criará automaticamente os diretórios se não existirem
+
 ## ✔️ 3. Instalação
 1. Criar diretório base
+
+**Nota**: Os caminhos dos diretórios são configuráveis via `config.env`. Os comandos abaixo usam os caminhos padrão. Se você configurar caminhos diferentes, ajuste os comandos conforme necessário.
+
+**Nota**: Se você usar `RENAME_IN_PLACE="true"`, as pastas `processed` e `reject` são opcionais, mas ainda são criadas automaticamente pelo serviço.
+
 ```bash
+# Criar todos os diretórios (recomendado) - usando caminhos padrão
 mkdir -p /opt/nfse-renamer/files/{inbound,processed,reject}
 mkdir -p /opt/nfse-renamer/logs
+
+# Ou apenas o diretório obrigatório (se usar RENAME_IN_PLACE="true")
+mkdir -p /opt/nfse-renamer/files/inbound
+mkdir -p /opt/nfse-renamer/logs
+
+# IMPORTANTE: Após criar os diretórios, configure os caminhos desejados em config.env
+# O serviço criará automaticamente os diretórios configurados se não existirem
 ```
 
 2. Descompactar o ZIP
@@ -267,9 +308,13 @@ Essas regex foram testadas com PDFs reais da Prefeitura de Porto Alegre.
 
 ### Sistema de Retry Automático
 
-O serviço implementa um sistema robusto de retry que tenta processar arquivos até `MAX_RETRIES` vezes antes de movê-los para `/reject`. Isso garante que erros temporários (arquivo ainda sendo escrito, rede instável, etc.) não resultem em rejeição imediata.
+O serviço implementa um sistema robusto de retry que tenta processar arquivos até `MAX_RETRIES` vezes. Isso garante que erros temporários (arquivo ainda sendo escrito, rede instável, etc.) não resultem em rejeição imediata.
 
-### Situações que levam à pasta /reject (após todas as tentativas):
+**Comportamento por modo**:
+- **Modo padrão** (`RENAME_IN_PLACE="false"`): Após todas as tentativas, arquivo é movido para `/reject`
+- **Modo renomear no lugar** (`RENAME_IN_PLACE="true"`): Após todas as tentativas, arquivo permanece em `/inbound` (não é movido)
+
+### Situações que levam à pasta /reject ou permanência em /inbound (após todas as tentativas):
 
 - PDF sem texto legível
 - Campos obrigatórios ausentes
@@ -342,13 +387,26 @@ journalctl -u nfse-renamer -n 50
 
 ## ✔️ 9. Testes
 1. Copie um PDF válido para inbound:
-cp exemplo.pdf /opt/nfse-renamer/inbound/
+```bash
+cp exemplo.pdf /opt/nfse-renamer/files/inbound/
+```
 
 2. Observe processamento:
+```bash
 journalctl -u nfse-renamer -f
+```
 
 3. Verifique saída:
-/opt/nfse-renamer/processed/nfse_<cnpj>_<rps>_<nfse>_<serie>.pdf
+
+**Se `RENAME_IN_PLACE="false"` (padrão)**:
+```bash
+/opt/nfse-renamer/files/processed/nfse_<cnpj>_<rps>_<nfse>_<serie>.pdf
+```
+
+**Se `RENAME_IN_PLACE="true"`**:
+```bash
+/opt/nfse-renamer/files/inbound/nfse_<cnpj>_<rps>_<nfse>_<serie>.pdf
+```
 
 ## ✔️ 10. Permissões e Movimentação de Arquivos
 
@@ -427,15 +485,17 @@ tail -n 50 /opt/nfse-renamer/logs/nfse_renamer.log
 journalctl -u nfse-renamer -n 50
 ```
 
-**Verificar se arquivo está em /reject**:
+**Verificar se arquivo está em /reject** (apenas se `RENAME_IN_PLACE="false"`):
 ```bash
-ls -la /opt/nfse-renamer/reject/
+ls -la /opt/nfse-renamer/files/reject/
 ```
 
 **Verificar se arquivo ainda está em /inbound**:
 ```bash
-ls -la /opt/nfse-renamer/inbound/
+ls -la /opt/nfse-renamer/files/inbound/
 ```
+
+**Nota**: Se `RENAME_IN_PLACE="true"`, arquivos processados e com erro permanecem em `/inbound/`.
 
 ### ❗ Regex não encontrou campos
 
@@ -460,12 +520,18 @@ Editar `/etc/systemd/system/nfse-renamer.service` e ajustar `StartLimitInterval`
 
 ### ❗ Arquivos ficam presos em /inbound
 
+**Se `RENAME_IN_PLACE="false"`**:
 - Verificar permissões de escrita em `/processed` e `/reject`
 - Verificar espaço em disco: `df -h`
 - Consultar logs para erros específicos
-- Verificar se arquivo está sendo usado por outro processo: `lsof /opt/nfse-renamer/inbound/arquivo.pdf`
+- Verificar se arquivo está sendo usado por outro processo: `lsof /opt/nfse-renamer/files/inbound/arquivo.pdf`
 
-## ✔️ 11. Roadmap Futuro
+**Se `RENAME_IN_PLACE="true"`**:
+- Arquivos devem permanecer em `/inbound/` após processamento (comportamento esperado)
+- Verificar se arquivo foi renomeado corretamente
+- Consultar logs para verificar se houve erro no processamento
+
+## ✔️ 12. Roadmap Futuro
 
 Processamento paralelo
 
@@ -475,7 +541,7 @@ Registro de auditoria Syslog
 
 Regras customizadas por município
 
-## ✔️ 12. Autor / Suporte Técnico
+## ✔️ 13. Autor / Suporte Técnico
 
 NFSe Renamer Service
 Desenvolvido para automação de integração fiscal, padrão corporativo e alto desempenho operacional.
