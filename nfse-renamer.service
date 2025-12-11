@@ -1,0 +1,33 @@
+[Unit]
+Description=NFSe Renamer Service - Extração automática de metadados de NFSe
+Documentation=file:///opt/nfse-renamer/docs/README_NFSE_RENAMER.md
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m src
+Restart=always
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+WorkingDirectory=/opt/nfse-renamer
+User=root
+Group=root
+
+# Logs
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nfse-renamer
+
+# Segurança
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Recursos
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
