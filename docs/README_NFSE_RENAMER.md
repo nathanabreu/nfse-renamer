@@ -152,9 +152,13 @@ journalctl -u nfse-renamer --since today
    nfse_<cnpj>_<rps>_<nfse>_<serie>.pdf
    ```
 
-6. **Movimentação**:
-   - `/processed` → sucesso
-   - `/reject` → falha após todas as tentativas (log detalhado gerado)
+6. **Renomeação/Movimentação**:
+   - **Modo padrão** (`RENAME_IN_PLACE="false"`):
+     - `/processed` → sucesso
+     - `/reject` → falha após todas as tentativas (log detalhado gerado)
+   - **Modo renomear no lugar** (`RENAME_IN_PLACE="true"`):
+     - Arquivo é renomeado na própria pasta `/inbound`
+     - Em caso de erro, arquivo permanece em `/inbound` (não é movido)
 
 ### Características de Robustez
 
@@ -163,6 +167,7 @@ journalctl -u nfse-renamer --since today
 - ✅ **Prevenção de duplicatas**: Evita processar o mesmo arquivo simultaneamente
 - ✅ **Timeout de processamento**: Limite configurável para evitar travamentos
 - ✅ **Tratamento de arquivos em uso**: Detecta e aguarda liberação
+- ✅ **Ajuste automático de permissões**: Garante permissões consistentes em todos os PDFs processados
 - ✅ **Logs detalhados**: Todos os eventos são registrados com stack trace em erros
 
 ## ✔️ 5. Configuração Parametrizada (config.env)
@@ -208,12 +213,44 @@ RETRY_DELAY="2"
 
 # Timeout máximo para processamento de um arquivo (segundos)
 PROCESS_TIMEOUT="60"
+
+# Permissões dos arquivos PDF após processamento (formato octal: 644 = rw-r--r--)
+FILE_PERMISSIONS="644"
+
+# Permissões dos diretórios de processamento (formato octal: 755 = rwxr-xr-x)
+DIR_PERMISSIONS="755"
+
+# Ajustar permissões de todos os PDFs nas pastas a cada ciclo (true/false)
+FIX_PERMISSIONS_ON_CYCLE="true"
+
+# Renomear arquivo na própria pasta INPUT_DIR sem mover (true/false)
+RENAME_IN_PLACE="false"
 ```
 
 **Explicação**:
 - `MAX_RETRIES`: Quantas vezes o serviço tentará processar um arquivo antes de mover para `/reject`
 - `RETRY_DELAY`: Tempo de espera entre cada tentativa (útil para arquivos ainda sendo escritos)
 - `PROCESS_TIMEOUT`: Limite máximo de tempo para processar um arquivo (evita travamentos)
+- `FILE_PERMISSIONS`: Permissões dos arquivos PDF após processamento (formato octal, padrão: 644 = rw-r--r--)
+- `DIR_PERMISSIONS`: Permissões dos diretórios de processamento (formato octal, padrão: 755 = rwxr-xr-x)
+- `FIX_PERMISSIONS_ON_CYCLE`: Se `true`, ajusta permissões de todos os PDFs e diretórios a cada ciclo de iteração
+- `RENAME_IN_PLACE`: Se `true`, renomeia o arquivo na própria pasta INPUT_DIR sem mover para processed/reject
+
+**Modo Renomear no Lugar**:
+- `RENAME_IN_PLACE="true"`: Renomeia o arquivo na própria pasta INPUT_DIR, sem mover para processed/reject
+- `RENAME_IN_PLACE="false"`: Comportamento padrão - move arquivos para processed (sucesso) ou reject (erro)
+- Útil quando você quer manter todos os arquivos na mesma pasta, apenas renomeados
+- Quando ativado, arquivos com erro permanecem em INPUT_DIR (não são movidos para reject)
+- Exemplo: `nota.pdf` → `nfse_02886427002450_146345_8_1.pdf` (na mesma pasta)
+
+**Permissões e Movimentação de Arquivos**:
+- ✅ **O serviço consegue mover e renomear PDFs**: O serviço roda como `root` (configurado no systemd), então tem todas as permissões necessárias para mover arquivos, independentemente das permissões do arquivo ou diretório
+- ✅ **Permissões de arquivo (644)**: Aplicadas aos PDFs após processamento para garantir consistência e segurança
+- ✅ **Permissões de diretório (755)**: Garantem que os diretórios tenham permissões corretas para leitura/escrita
+- ✅ **Ajuste automático**: O serviço ajusta automaticamente as permissões de todos os PDFs e diretórios:
+  - No modo **polling**: ajusta permissões a cada ciclo de verificação
+  - No modo **watchdog**: ajusta permissões a cada 5 minutos e imediatamente após processar cada arquivo
+- ✅ **Importante**: As permissões do arquivo (644) **não impedem** a movimentação. Para mover um arquivo, o que importa são as permissões do **diretório** (que o serviço ajusta automaticamente para 755)
 
 Altere conforme necessidade de cada cliente/ambiente.
 
@@ -313,7 +350,44 @@ journalctl -u nfse-renamer -f
 3. Verifique saída:
 /opt/nfse-renamer/processed/nfse_<cnpj>_<rps>_<nfse>_<serie>.pdf
 
-## ✔️ 10. Troubleshooting
+## ✔️ 10. Permissões e Movimentação de Arquivos
+
+### ✅ O serviço consegue mover e renomear PDFs?
+
+**Sim!** O serviço está configurado para rodar como `root` no systemd (`User=root`), o que garante todas as permissões necessárias para:
+
+- ✅ Mover arquivos entre diretórios
+- ✅ Renomear arquivos
+- ✅ Criar novos arquivos
+- ✅ Ajustar permissões de arquivos e diretórios
+
+### Como funcionam as permissões?
+
+1. **Permissões do arquivo (644)**: 
+   - Aplicadas aos PDFs **após** o processamento
+   - **Não impedem** a movimentação (o serviço roda como root)
+   - Garantem que arquivos processados tenham permissões consistentes
+
+2. **Permissões do diretório (755)**:
+   - Aplicadas aos diretórios de processamento
+   - Garantem acesso adequado aos diretórios
+   - Ajustadas automaticamente na inicialização e a cada ciclo
+
+3. **Processo de movimentação**:
+   - O serviço move arquivos **antes** de ajustar permissões
+   - As permissões 644 são aplicadas **após** a movimentação
+   - Isso garante que o arquivo já está no destino correto quando as permissões são definidas
+
+### Exemplo de fluxo:
+
+```
+1. PDF chega em /inbound com permissões 777 (qualquer)
+2. Serviço (root) move para /processed (funciona sempre)
+3. Serviço ajusta permissões do arquivo para 644
+4. Serviço ajusta permissões do diretório para 755
+```
+
+## ✔️ 11. Troubleshooting
 
 ### ❗ Serviço não inicia
 

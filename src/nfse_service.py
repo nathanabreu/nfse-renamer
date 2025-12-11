@@ -7,6 +7,7 @@ import shutil
 import logging
 import signal
 import sys
+import stat
 import time
 from time import sleep
 from watchdog.observers import Observer
@@ -40,10 +41,21 @@ def load_config():
     CONFIG.setdefault("MAX_RETRIES", "3")
     CONFIG.setdefault("RETRY_DELAY", "2")  # segundos
     CONFIG.setdefault("PROCESS_TIMEOUT", "60")  # segundos
+    CONFIG.setdefault("FILE_PERMISSIONS", "644")  # permissões em octal
+    CONFIG.setdefault("DIR_PERMISSIONS", "755")  # permissões de diretórios em octal
+    CONFIG.setdefault("FIX_PERMISSIONS_ON_CYCLE", "true")  # ajustar permissões a cada ciclo
+    CONFIG.setdefault("RENAME_IN_PLACE", "false")  # renomear na própria pasta
     
-    # Criar diretórios se não existirem
+    # Criar diretórios se não existirem e ajustar permissões
     for dir_key in ["INPUT_DIR", "OUTPUT_DIR", "REJECT_DIR"]:
-        os.makedirs(CONFIG[dir_key], exist_ok=True)
+        dir_path = CONFIG[dir_key]
+        os.makedirs(dir_path, exist_ok=True)
+        # Ajusta permissões do diretório
+        try:
+            dir_permissions = int(CONFIG["DIR_PERMISSIONS"], 8)
+            os.chmod(dir_path, dir_permissions)
+        except Exception as e:
+            logging.warning(f"Erro ao ajustar permissões do diretório {dir_path}: {e}")
     
     # Criar diretório de logs
     log_dir = os.path.dirname(CONFIG["LOG_FILE"])
@@ -88,6 +100,75 @@ def is_file_locked(file_path):
     except (IOError, OSError):
         return True
 
+def set_file_permissions(file_path):
+    """
+    Ajusta permissões de um arquivo conforme configuração
+    """
+    try:
+        if not os.path.exists(file_path):
+            return False
+        
+        # Converte permissão de string octal para int
+        permissions = int(CONFIG["FILE_PERMISSIONS"], 8)
+        os.chmod(file_path, permissions)
+        logging.debug(f"Permissões ajustadas para {file_path}: {CONFIG['FILE_PERMISSIONS']}")
+        return True
+    except Exception as e:
+        logging.warning(f"Erro ao ajustar permissões de {file_path}: {e}")
+        return False
+
+def fix_permissions_in_directory(directory):
+    """
+    Ajusta permissões de todos os arquivos PDF em um diretório
+    """
+    if not os.path.exists(directory):
+        return
+    
+    try:
+        fixed_count = 0
+        for file in os.listdir(directory):
+            file_path = os.path.join(directory, file)
+            if os.path.isfile(file_path) and file.lower().endswith(".pdf"):
+                if set_file_permissions(file_path):
+                    fixed_count += 1
+        
+        if fixed_count > 0:
+            logging.debug(f"Permissões ajustadas para {fixed_count} arquivo(s) em {directory}")
+    except Exception as e:
+        logging.error(f"Erro ao ajustar permissões em {directory}: {e}")
+
+def set_directory_permissions(directory):
+    """
+    Ajusta permissões de um diretório conforme configuração
+    """
+    try:
+        if not os.path.exists(directory):
+            return False
+        
+        dir_permissions = int(CONFIG["DIR_PERMISSIONS"], 8)
+        os.chmod(directory, dir_permissions)
+        logging.debug(f"Permissões do diretório ajustadas: {directory} -> {CONFIG['DIR_PERMISSIONS']}")
+        return True
+    except Exception as e:
+        logging.warning(f"Erro ao ajustar permissões do diretório {directory}: {e}")
+        return False
+
+def fix_all_permissions():
+    """
+    Ajusta permissões de todos os PDFs e diretórios nas pastas de processamento
+    """
+    if CONFIG.get("FIX_PERMISSIONS_ON_CYCLE", "true").lower() not in ("true", "1", "yes"):
+        return
+    
+    # Ajusta permissões dos diretórios
+    set_directory_permissions(CONFIG["INPUT_DIR"])
+    set_directory_permissions(CONFIG["OUTPUT_DIR"])
+    set_directory_permissions(CONFIG["REJECT_DIR"])
+    
+    # Ajusta permissões dos arquivos PDF
+    fix_permissions_in_directory(CONFIG["OUTPUT_DIR"])
+    fix_permissions_in_directory(CONFIG["REJECT_DIR"])
+
 def process_pdf(path, retry_count=0):
     """
     Processa PDF com retry logic e tratamento robusto de erros
@@ -130,22 +211,50 @@ def process_pdf(path, retry_count=0):
         if elapsed > int(CONFIG["PROCESS_TIMEOUT"]):
             logging.warning(f"Processamento demorou {elapsed:.2f}s (timeout: {CONFIG['PROCESS_TIMEOUT']}s)")
         
-        # Verifica se arquivo ainda existe antes de mover
+        # Verifica se arquivo ainda existe antes de processar
         if not os.path.exists(path):
             logging.error(f"Arquivo foi removido durante processamento: {path}")
             return False
         
-        destino = os.path.join(CONFIG["OUTPUT_DIR"], new_name + ".pdf")
+        # Verifica se deve renomear no lugar ou mover
+        rename_in_place = CONFIG.get("RENAME_IN_PLACE", "false").lower() in ("true", "1", "yes")
         
-        # Verifica se destino já existe
-        if os.path.exists(destino):
-            logging.warning(f"Arquivo destino já existe, adicionando timestamp: {destino}")
-            base_name = new_name + "_" + str(int(time.time()))
-            destino = os.path.join(CONFIG["OUTPUT_DIR"], base_name + ".pdf")
+        if rename_in_place:
+            # Renomeia na própria pasta INPUT_DIR
+            dir_path = os.path.dirname(path)
+            destino = os.path.join(dir_path, new_name + ".pdf")
+            
+            # Verifica se destino já existe
+            if os.path.exists(destino):
+                logging.warning(f"Arquivo destino já existe, adicionando timestamp: {destino}")
+                base_name = new_name + "_" + str(int(time.time()))
+                destino = os.path.join(dir_path, base_name + ".pdf")
+            
+            # Renomeia arquivo
+            os.rename(path, destino)
+            
+            # Ajusta permissões do arquivo renomeado
+            set_file_permissions(destino)
+            
+            logging.info(f"Arquivo renomeado com sucesso → {destino}")
+        else:
+            # Comportamento padrão: move para OUTPUT_DIR
+            destino = os.path.join(CONFIG["OUTPUT_DIR"], new_name + ".pdf")
+            
+            # Verifica se destino já existe
+            if os.path.exists(destino):
+                logging.warning(f"Arquivo destino já existe, adicionando timestamp: {destino}")
+                base_name = new_name + "_" + str(int(time.time()))
+                destino = os.path.join(CONFIG["OUTPUT_DIR"], base_name + ".pdf")
+            
+            # Move arquivo
+            shutil.move(path, destino)
+            
+            # Ajusta permissões do arquivo processado
+            set_file_permissions(destino)
+            
+            logging.info(f"Arquivo processado com sucesso → {destino}")
         
-        # Move arquivo
-        shutil.move(path, destino)
-        logging.info(f"Arquivo processado com sucesso → {destino}")
         return True
         
     except FileNotFoundError as e:
@@ -161,21 +270,32 @@ def process_pdf(path, retry_count=0):
     except Exception as e:
         logging.error(f"Erro processando {path}: {type(e).__name__}: {e}", exc_info=True)
         
-        # Move para reject apenas se arquivo ainda existir
-        try:
-            if os.path.exists(path):
-                reject_path = os.path.join(CONFIG["REJECT_DIR"], os.path.basename(path))
-                # Evita sobrescrever arquivo existente em reject
-                if os.path.exists(reject_path):
-                    base_name = os.path.splitext(os.path.basename(path))[0]
-                    reject_path = os.path.join(
-                        CONFIG["REJECT_DIR"], 
-                        f"{base_name}_{int(time.time())}.pdf"
-                    )
-                shutil.move(path, reject_path)
-                logging.error(f"Arquivo movido para REJECT: {reject_path}")
-        except Exception as move_error:
-            logging.error(f"Erro ao mover para REJECT: {move_error}")
+        # Verifica se deve renomear no lugar ou mover para reject
+        rename_in_place = CONFIG.get("RENAME_IN_PLACE", "false").lower() in ("true", "1", "yes")
+        
+        if rename_in_place:
+            # Em modo rename_in_place, apenas loga o erro, não move arquivo
+            logging.error(f"Arquivo não pôde ser processado (permanece em INPUT_DIR): {path}")
+        else:
+            # Comportamento padrão: move para reject
+            try:
+                if os.path.exists(path):
+                    reject_path = os.path.join(CONFIG["REJECT_DIR"], os.path.basename(path))
+                    # Evita sobrescrever arquivo existente em reject
+                    if os.path.exists(reject_path):
+                        base_name = os.path.splitext(os.path.basename(path))[0]
+                        reject_path = os.path.join(
+                            CONFIG["REJECT_DIR"], 
+                            f"{base_name}_{int(time.time())}.pdf"
+                        )
+                    shutil.move(path, reject_path)
+                    
+                    # Ajusta permissões do arquivo rejeitado
+                    set_file_permissions(reject_path)
+                    
+                    logging.error(f"Arquivo movido para REJECT: {reject_path}")
+            except Exception as move_error:
+                logging.error(f"Erro ao mover para REJECT: {move_error}")
         
         return False
     finally:
@@ -204,6 +324,9 @@ def scan_directory():
     
     for pdf_path in pdf_files:
         process_pdf(pdf_path)
+    
+    # Ajusta permissões de todos os PDFs nas pastas a cada ciclo
+    fix_all_permissions()
 
 def signal_handler(signum, frame):
     """Handler para sinais de sistema (SIGTERM, SIGINT)"""
@@ -234,7 +357,17 @@ def main():
     logging.info(f"POLLING_INTERVAL: {CONFIG['POLLING_INTERVAL']}s")
     logging.info(f"USE_POLLING: {CONFIG['USE_POLLING']}")
     logging.info(f"MAX_RETRIES: {CONFIG['MAX_RETRIES']}")
+    logging.info(f"FILE_PERMISSIONS: {CONFIG['FILE_PERMISSIONS']} (octal)")
+    logging.info(f"DIR_PERMISSIONS: {CONFIG['DIR_PERMISSIONS']} (octal)")
+    logging.info(f"FIX_PERMISSIONS_ON_CYCLE: {CONFIG['FIX_PERMISSIONS_ON_CYCLE']}")
+    logging.info(f"RENAME_IN_PLACE: {CONFIG['RENAME_IN_PLACE']}")
     logging.info("=" * 60)
+    
+    # Ajusta permissões dos diretórios na inicialização
+    logging.info("Ajustando permissões dos diretórios...")
+    set_directory_permissions(CONFIG["INPUT_DIR"])
+    set_directory_permissions(CONFIG["OUTPUT_DIR"])
+    set_directory_permissions(CONFIG["REJECT_DIR"])
     
     use_polling = CONFIG["USE_POLLING"].lower() in ("true", "1", "yes")
     polling_interval = int(CONFIG["POLLING_INTERVAL"])
@@ -260,8 +393,17 @@ def main():
         observer.start()
         
         try:
+            last_permission_fix = time.time()
+            permission_fix_interval = 300  # 5 minutos
+            
             while True:
                 sleep(1)
+                
+                # Ajusta permissões periodicamente no modo watchdog
+                current_time = time.time()
+                if current_time - last_permission_fix >= permission_fix_interval:
+                    fix_all_permissions()
+                    last_permission_fix = current_time
         except KeyboardInterrupt:
             logging.info("Serviço interrompido pelo usuário")
             observer.stop()
