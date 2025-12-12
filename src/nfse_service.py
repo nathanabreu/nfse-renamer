@@ -52,9 +52,11 @@ def load_config():
     # INPUT_DIR sempre é necessário
     dirs_to_manage = ["INPUT_DIR"]
     
-    # OUTPUT_DIR e REJECT_DIR só são necessários se não estiver em modo RENAME_IN_PLACE
+    # REJECT_DIR sempre é necessário (arquivos com erro são movidos para reject mesmo em RENAME_IN_PLACE)
+    # OUTPUT_DIR só é necessário se não estiver em modo RENAME_IN_PLACE
+    dirs_to_manage.append("REJECT_DIR")
     if not rename_in_place:
-        dirs_to_manage.extend(["OUTPUT_DIR", "REJECT_DIR"])
+        dirs_to_manage.append("OUTPUT_DIR")
     
     # Criar diretórios se não existirem e ajustar permissões
     for dir_key in dirs_to_manage:
@@ -64,45 +66,69 @@ def load_config():
         if not os.path.exists(dir_path):
             try:
                 os.makedirs(dir_path, exist_ok=True)
-                logging.debug(f"Diretório criado: {dir_path}")
+                # Não usar logging aqui, ainda não está configurado
             except Exception as e:
-                logging.warning(f"Erro ao criar diretório {dir_path}: {e}")
+                print(f"AVISO: Erro ao criar diretório {dir_path}: {e}")
                 continue
-        else:
-            logging.debug(f"Diretório já existe: {dir_path}")
         
         # Ajusta permissões do diretório (seja criado agora ou já existente)
         try:
             dir_permissions = int(CONFIG["DIR_PERMISSIONS"], 8)
             os.chmod(dir_path, dir_permissions)
-            logging.debug(f"Permissões ajustadas para {dir_path}: {CONFIG['DIR_PERMISSIONS']}")
         except Exception as e:
-            logging.warning(f"Erro ao ajustar permissões do diretório {dir_path}: {e}")
+            print(f"AVISO: Erro ao ajustar permissões do diretório {dir_path}: {e}")
     
-    # Criar diretório de logs
+    # Criar diretório de logs (não usar logging aqui, ainda não está configurado)
     log_dir = os.path.dirname(CONFIG["LOG_FILE"])
     if not os.path.exists(log_dir):
         try:
             os.makedirs(log_dir, exist_ok=True)
-            logging.debug(f"Diretório de logs criado: {log_dir}")
         except Exception as e:
-            logging.warning(f"Erro ao criar diretório de logs {log_dir}: {e}")
-    else:
-        logging.debug(f"Diretório de logs já existe: {log_dir}")
+            print(f"ERRO: Falha ao criar diretório de logs {log_dir}: {e}")
+            raise
 
 def setup_logging():
     """Configura sistema de logging"""
-    logging.basicConfig(
-        filename=CONFIG["LOG_FILE"],
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    # Também logar no console quando rodando como serviço
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    logging.getLogger().addHandler(console_handler)
+    # Garante que o diretório de logs existe
+    log_dir = os.path.dirname(CONFIG["LOG_FILE"])
+    if not os.path.exists(log_dir):
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except Exception as e:
+            print(f"ERRO: Falha ao criar diretório de logs {log_dir}: {e}")
+            sys.exit(1)
+    
+    # Remove handlers existentes para evitar duplicação
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Configura formato
+    log_format = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    
+    # Handler para arquivo
+    try:
+        file_handler = logging.FileHandler(CONFIG["LOG_FILE"], mode='a', encoding='utf-8')
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(log_format)
+        root_logger.addHandler(file_handler)
+        
+        # Testa se consegue escrever no arquivo
+        logging.info("=" * 60)
+        logging.info("Sistema de logging inicializado")
+    except Exception as e:
+        print(f"ERRO: Falha ao configurar arquivo de log {CONFIG['LOG_FILE']}: {e}")
+        sys.exit(1)
+    
+    # Handler para console (apenas quando não rodando como serviço systemd)
+    # O systemd já captura stdout/stderr, então não precisa duplicar
+    if sys.stdout.isatty():  # Só adiciona se for terminal interativo
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(log_format)
+        root_logger.addHandler(console_handler)
+    
+    root_logger.setLevel(logging.INFO)
 
 def wait_for_file_ready(file_path, max_wait=10):
     """Aguarda arquivo estar completamente escrito e disponível"""
@@ -195,19 +221,32 @@ def fix_all_permissions():
     if os.path.exists(CONFIG["INPUT_DIR"]):
         set_directory_permissions(CONFIG["INPUT_DIR"])
     
-    # OUTPUT_DIR e REJECT_DIR só são usados se não estiver em modo RENAME_IN_PLACE
+    # REJECT_DIR sempre é usado (arquivos com erro são movidos para reject)
+    if os.path.exists(CONFIG["REJECT_DIR"]):
+        set_directory_permissions(CONFIG["REJECT_DIR"])
+        fix_permissions_in_directory(CONFIG["REJECT_DIR"])
+    
+    # OUTPUT_DIR só é usado se não estiver em modo RENAME_IN_PLACE
     if not rename_in_place:
         if os.path.exists(CONFIG["OUTPUT_DIR"]):
             set_directory_permissions(CONFIG["OUTPUT_DIR"])
             fix_permissions_in_directory(CONFIG["OUTPUT_DIR"])
-        
-        if os.path.exists(CONFIG["REJECT_DIR"]):
-            set_directory_permissions(CONFIG["REJECT_DIR"])
-            fix_permissions_in_directory(CONFIG["REJECT_DIR"])
     else:
-        # No modo RENAME_IN_PLACE, ajusta permissões apenas em INPUT_DIR
+        # No modo RENAME_IN_PLACE, ajusta permissões também em INPUT_DIR
         if os.path.exists(CONFIG["INPUT_DIR"]):
             fix_permissions_in_directory(CONFIG["INPUT_DIR"])
+
+def should_process_file(filename):
+    """
+    Verifica se o arquivo deve ser processado.
+    Processa apenas arquivos que começam com "NFSE" em maiúsculo.
+    """
+    if not filename.lower().endswith(".pdf"):
+        return False
+    
+    # Processa apenas arquivos que começam com "NFSE" (maiúsculo)
+    # Isso evita reprocessar arquivos já processados (que começam com "nfse" minúsculo)
+    return filename.startswith("NFSE_")
 
 def process_pdf(path, retry_count=0):
     """
@@ -230,6 +269,12 @@ def process_pdf(path, retry_count=0):
         
         if not path.lower().endswith(".pdf"):
             logging.debug(f"Ignorando arquivo não-PDF: {path}")
+            return False
+        
+        # Verifica se arquivo deve ser processado (apenas os que começam com "NFSE" em maiúsculo)
+        filename = os.path.basename(path)
+        if not should_process_file(filename):
+            logging.debug(f"Ignorando arquivo (não começa com NFSE_): {path}")
             return False
         
         # Aguarda arquivo estar pronto
@@ -308,34 +353,45 @@ def process_pdf(path, retry_count=0):
             return process_pdf(path, retry_count + 1)
         return False
     except Exception as e:
-        logging.error(f"Erro processando {path}: {type(e).__name__}: {e}", exc_info=True)
+        # Log de erro com mais detalhes para diferentes tipos de erro
+        error_type = type(e).__name__
+        error_msg = str(e)
         
-        # Verifica se deve renomear no lugar ou mover para reject
-        rename_in_place = CONFIG.get("RENAME_IN_PLACE", "false").lower() in ("true", "1", "yes")
-        
-        if rename_in_place:
-            # Em modo rename_in_place, apenas loga o erro, não move arquivo
-            logging.error(f"Arquivo não pôde ser processado (permanece em INPUT_DIR): {path}")
+        # Log mais detalhado para erros de leitura de PDF
+        if "ValueError" in error_type and ("PDF não pode ser lido" in error_msg or "estrutura não padrão" in error_msg or "No /Root" in error_msg):
+            logging.error(f"Erro ao ler PDF (estrutura não padrão): {path}")
+            logging.error(f"  Detalhes: {error_msg}")
+            logging.error(f"  Sugestão: O PDF pode estar corrompido ou ter formato não suportado pelo pdfplumber")
+        elif "ValueError" in error_type and ("não encontrado" in error_msg or "não contém texto" in error_msg):
+            logging.error(f"Erro ao extrair informações do PDF: {path}")
+            logging.error(f"  Detalhes: {error_msg}")
+            logging.error(f"  Sugestão: O PDF pode não conter os campos esperados (CNPJ, RPS, NFSe, Série)")
         else:
-            # Comportamento padrão: move para reject
-            try:
-                if os.path.exists(path):
-                    reject_path = os.path.join(CONFIG["REJECT_DIR"], os.path.basename(path))
-                    # Evita sobrescrever arquivo existente em reject
-                    if os.path.exists(reject_path):
-                        base_name = os.path.splitext(os.path.basename(path))[0]
-                        reject_path = os.path.join(
-                            CONFIG["REJECT_DIR"], 
-                            f"{base_name}_{int(time.time())}.pdf"
-                        )
-                    shutil.move(path, reject_path)
-                    
-                    # Ajusta permissões do arquivo rejeitado
-                    set_file_permissions(reject_path)
-                    
-                    logging.error(f"Arquivo movido para REJECT: {reject_path}")
-            except Exception as move_error:
-                logging.error(f"Erro ao mover para REJECT: {move_error}")
+            logging.error(f"Erro processando {path}: {error_type}: {error_msg}")
+        
+        # Sempre move arquivos com erro para REJECT_DIR (mesmo em modo RENAME_IN_PLACE)
+        # Mas só se o arquivo ainda existir no caminho original
+        try:
+            if os.path.exists(path):
+                reject_path = os.path.join(CONFIG["REJECT_DIR"], os.path.basename(path))
+                # Evita sobrescrever arquivo existente em reject
+                if os.path.exists(reject_path):
+                    base_name = os.path.splitext(os.path.basename(path))[0]
+                    reject_path = os.path.join(
+                        CONFIG["REJECT_DIR"], 
+                        f"{base_name}_{int(time.time())}.pdf"
+                    )
+                shutil.move(path, reject_path)
+                
+                # Ajusta permissões do arquivo rejeitado
+                set_file_permissions(reject_path)
+                
+                logging.error(f"Arquivo movido para REJECT: {reject_path}")
+            else:
+                # Arquivo não existe mais - pode ter sido processado antes do erro
+                logging.warning(f"Arquivo não encontrado após erro - pode ter sido processado antes da falha: {path}")
+        except Exception as move_error:
+            logging.error(f"Erro ao mover para REJECT: {move_error}")
         
         return False
     finally:
@@ -348,6 +404,10 @@ class NFSeHandler(FileSystemEventHandler):
             return
         if not event.src_path.lower().endswith(".pdf"):
             return
+        # Processa apenas arquivos que começam com "NFSE" em maiúsculo
+        filename = os.path.basename(event.src_path)
+        if not should_process_file(filename):
+            return
         # Processa em thread separada para não bloquear
         process_pdf(event.src_path)
 
@@ -357,7 +417,7 @@ def scan_directory():
     try:
         for file in os.listdir(CONFIG["INPUT_DIR"]):
             file_path = os.path.join(CONFIG["INPUT_DIR"], file)
-            if os.path.isfile(file_path) and file.lower().endswith(".pdf"):
+            if os.path.isfile(file_path) and should_process_file(file):
                 pdf_files.append(file_path)
     except Exception as e:
         logging.error(f"Erro ao escanear diretório: {e}")
@@ -410,12 +470,14 @@ def main():
     if os.path.exists(CONFIG["INPUT_DIR"]):
         set_directory_permissions(CONFIG["INPUT_DIR"])
     
-    # OUTPUT_DIR e REJECT_DIR só são usados se não estiver em modo RENAME_IN_PLACE
+    # REJECT_DIR sempre é usado (arquivos com erro são movidos para reject)
+    if os.path.exists(CONFIG["REJECT_DIR"]):
+        set_directory_permissions(CONFIG["REJECT_DIR"])
+    
+    # OUTPUT_DIR só é usado se não estiver em modo RENAME_IN_PLACE
     if not rename_in_place:
         if os.path.exists(CONFIG["OUTPUT_DIR"]):
             set_directory_permissions(CONFIG["OUTPUT_DIR"])
-        if os.path.exists(CONFIG["REJECT_DIR"]):
-            set_directory_permissions(CONFIG["REJECT_DIR"])
     
     use_polling = CONFIG["USE_POLLING"].lower() in ("true", "1", "yes")
     polling_interval = int(CONFIG["POLLING_INTERVAL"])
@@ -430,7 +492,7 @@ def main():
         except KeyboardInterrupt:
             logging.info("Serviço interrompido pelo usuário")
         except Exception as e:
-            logging.error(f"Erro fatal no serviço: {e}", exc_info=True)
+            logging.error(f"Erro fatal no serviço: {type(e).__name__}: {str(e)}")
             sys.exit(1)
     else:
         # Modo watchdog (event-driven)
@@ -456,7 +518,7 @@ def main():
             logging.info("Serviço interrompido pelo usuário")
             observer.stop()
         except Exception as e:
-            logging.error(f"Erro fatal no serviço: {e}", exc_info=True)
+            logging.error(f"Erro fatal no serviço: {type(e).__name__}: {str(e)}")
             observer.stop()
             sys.exit(1)
         finally:

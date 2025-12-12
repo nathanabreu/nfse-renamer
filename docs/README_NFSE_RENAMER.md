@@ -2,6 +2,8 @@
 
 Serviço Linux em Python para extração automática de metadados de NFSe (Prefeitura de Porto Alegre) a partir de arquivos PDF, com renomeação padronizada e movimentação por diretórios monitorados.
 
+**⚠️ Importante**: O serviço processa apenas arquivos PDF que começam com `NFSE_` (maiúsculo). Arquivos já processados (que começam com `nfse_` em minúsculo) são automaticamente ignorados para evitar reprocessamento.
+
 O objetivo é garantir que todos os PDFs entregues ao conector fiscal sigam o padrão definido pelo cliente:
 
 ```
@@ -54,8 +56,8 @@ A solução é composta por quatro módulos principais:
      - `/processed` → sucesso
      - `/reject` → erro de leitura/extração após todas as tentativas
    - **Modo renomear no lugar** (`RENAME_IN_PLACE="true"`):
-     - Arquivo é renomeado na própria pasta INPUT_DIR
-     - Em caso de erro, arquivo permanece em INPUT_DIR
+     - Arquivo é renomeado na própria pasta INPUT_DIR (sucesso)
+     - Em caso de erro, arquivo é movido para REJECT_DIR
    
    Inclui sistema robusto de retry, validação de arquivos e tratamento de erros.
 
@@ -86,10 +88,14 @@ A solução é composta por quatro módulos principais:
 ├── docs/                    # Documentação
 │   └── README_NFSE_RENAMER.md
 │
+├── scripts/                  # Scripts auxiliares
+│   ├── install.sh           # Script de instalação automática
+│   └── run_local.sh         # Script para execução local (desenvolvimento)
+│
 ├── files/                   # Diretórios de trabalho (caminhos configuráveis em config.env)
 │   ├── inbound/             # PDFs de entrada (monitorado) - caminho definido por INPUT_DIR
 │   ├── processed/           # PDFs processados (caminho definido por OUTPUT_DIR, opcional se RENAME_IN_PLACE="true")
-│   └── reject/              # PDFs rejeitados (caminho definido por REJECT_DIR, opcional se RENAME_IN_PLACE="true")
+│   └── reject/              # PDFs rejeitados (caminho definido por REJECT_DIR, sempre necessário)
 │
 └── logs/                    # Arquivos de log (caminho definido por LOG_FILE)
     └── nfse_renamer.log
@@ -101,11 +107,29 @@ A solução é composta por quatro módulos principais:
 - O serviço criará automaticamente os diretórios se não existirem
 
 ## ✔️ 3. Instalação
+
+### Instalação Automática (Recomendada)
+
+Use o script de instalação automática:
+
+```bash
+sudo ./scripts/install.sh
+```
+
+O script irá:
+- Criar todos os diretórios necessários
+- Copiar arquivos para `/opt/nfse-renamer`
+- Instalar dependências Python
+- Configurar e iniciar o serviço systemd
+- Verificar se tudo está funcionando
+
+### Instalação Manual
+
 1. Criar diretório base
 
 **Nota**: Os caminhos dos diretórios são configuráveis via `config.env`. Os comandos abaixo usam os caminhos padrão. Se você configurar caminhos diferentes, ajuste os comandos conforme necessário.
 
-**Nota**: Se você usar `RENAME_IN_PLACE="true"`, as pastas `processed` e `reject` são opcionais, mas ainda são criadas automaticamente pelo serviço.
+**Nota**: Se você usar `RENAME_IN_PLACE="true"`, a pasta `processed` é opcional, mas `reject` é sempre necessária (arquivos com erro são movidos para reject mesmo neste modo).
 
 ```bash
 # Criar todos os diretórios (recomendado) - usando caminhos padrão
@@ -121,10 +145,41 @@ mkdir -p /opt/nfse-renamer/logs
 ```
 
 2. Descompactar o ZIP
+```bash
 unzip nfse-renamer.zip -d /opt/
+```
 
 3. Instalar bibliotecas Python
+
+**Opção A - Instalação direta (se permitido pelo sistema)**:
+```bash
 pip3 install watchdog pdfplumber
+```
+
+**Opção B - Se receber erro "externally-managed-environment"**:
+
+Este erro ocorre em sistemas Linux modernos (Debian 12+, Ubuntu 23.04+) que protegem o ambiente Python do sistema. Use uma das soluções abaixo:
+
+**Solução 1: Usar flag --break-system-packages (recomendado para serviços systemd)**
+```bash
+pip3 install --break-system-packages watchdog pdfplumber
+```
+
+**Solução 2: Criar virtual environment (alternativa mais segura)**
+```bash
+# Criar virtual environment
+python3 -m venv /opt/nfse-renamer/venv
+
+# Ativar e instalar dependências
+source /opt/nfse-renamer/venv/bin/activate
+pip install watchdog pdfplumber
+deactivate
+
+# IMPORTANTE: Se usar venv, atualize o arquivo systemd para usar o Python do venv:
+# ExecStart=/opt/nfse-renamer/venv/bin/python3 -m src
+```
+
+**Nota**: Para serviços systemd rodando como root, a Solução 1 é geralmente mais simples e adequada.
 
 4. Configurar o systemd
 ```bash
@@ -178,9 +233,12 @@ journalctl -u nfse-renamer --since today
    - **Modo Polling**: Detecta no próximo ciclo de verificação (configurável)
 
 3. **Validação e preparação**:
+   - Verifica se arquivo começa com "NFSE_" (maiúsculo) - apenas estes são processados
    - Aguarda arquivo estar completamente escrito
    - Verifica se não está em uso por outro processo
    - Valida extensão PDF
+   
+   **Importante**: O serviço processa apenas arquivos que começam com `NFSE_` em maiúsculo. Isso evita reprocessar arquivos já processados (que ficam como `nfse_...` em minúsculo).
 
 4. **Extração de metadados** (com retry em caso de erro):
    - CNPJ emitente
@@ -198,8 +256,8 @@ journalctl -u nfse-renamer --since today
      - `/processed` → sucesso
      - `/reject` → falha após todas as tentativas (log detalhado gerado)
    - **Modo renomear no lugar** (`RENAME_IN_PLACE="true"`):
-     - Arquivo é renomeado na própria pasta `/inbound`
-     - Em caso de erro, arquivo permanece em `/inbound` (não é movido)
+     - Arquivo é renomeado na própria pasta `/inbound` (sucesso)
+     - Em caso de erro, arquivo é movido para `/reject`
 
 ### Características de Robustez
 
@@ -275,14 +333,16 @@ RENAME_IN_PLACE="false"
 - `FILE_PERMISSIONS`: Permissões dos arquivos PDF após processamento (formato octal, padrão: 644 = rw-r--r--)
 - `DIR_PERMISSIONS`: Permissões dos diretórios de processamento (formato octal, padrão: 755 = rwxr-xr-x)
 - `FIX_PERMISSIONS_ON_CYCLE`: Se `true`, ajusta permissões de todos os PDFs e diretórios a cada ciclo de iteração
-- `RENAME_IN_PLACE`: Se `true`, renomeia o arquivo na própria pasta INPUT_DIR sem mover para processed/reject
+- `RENAME_IN_PLACE`: Se `true`, renomeia o arquivo na própria pasta INPUT_DIR quando processado com sucesso
 
 **Modo Renomear no Lugar**:
-- `RENAME_IN_PLACE="true"`: Renomeia o arquivo na própria pasta INPUT_DIR, sem mover para processed/reject
+- `RENAME_IN_PLACE="true"`: 
+  - **Sucesso**: Renomeia o arquivo na própria pasta INPUT_DIR (não move para processed)
+  - **Erro**: Move arquivo para REJECT_DIR (mesmo comportamento do modo padrão)
 - `RENAME_IN_PLACE="false"`: Comportamento padrão - move arquivos para processed (sucesso) ou reject (erro)
-- Útil quando você quer manter todos os arquivos na mesma pasta, apenas renomeados
-- Quando ativado, arquivos com erro permanecem em INPUT_DIR (não são movidos para reject)
-- Exemplo: `nota.pdf` → `nfse_02886427002450_146345_8_1.pdf` (na mesma pasta)
+- Útil quando você quer manter arquivos processados na mesma pasta, apenas renomeados
+- **Importante**: Arquivos com erro são sempre movidos para REJECT_DIR, independente do modo
+- Exemplo de sucesso: `nota.pdf` → `nfse_02886427002450_146345_8_1.pdf` (na mesma pasta INPUT_DIR)
 
 **Permissões e Movimentação de Arquivos**:
 - ✅ **O serviço consegue mover e renomear PDFs**: O serviço roda como `root` (configurado no systemd), então tem todas as permissões necessárias para mover arquivos, independentemente das permissões do arquivo ou diretório
@@ -312,7 +372,8 @@ O serviço implementa um sistema robusto de retry que tenta processar arquivos a
 
 **Comportamento por modo**:
 - **Modo padrão** (`RENAME_IN_PLACE="false"`): Após todas as tentativas, arquivo é movido para `/reject`
-- **Modo renomear no lugar** (`RENAME_IN_PLACE="true"`): Após todas as tentativas, arquivo permanece em `/inbound` (não é movido)
+- **Modo renomear no lugar** (`RENAME_IN_PLACE="true"`): Após todas as tentativas, arquivo é movido para `/reject` (mesmo comportamento)
+- **Importante**: Independente do modo, arquivos com erro são sempre movidos para `/reject`
 
 ### Situações que levam à pasta /reject ou permanência em /inbound (após todas as tentativas):
 
@@ -457,7 +518,14 @@ chmod -R 755 /opt/nfse-renamer/src
 
 **Verificar dependências**:
 ```bash
+# Tentar instalação normal
 pip3 install watchdog pdfplumber
+
+# Se receber erro "externally-managed-environment", usar:
+pip3 install --break-system-packages watchdog pdfplumber
+
+# Verificar se estão instalados
+python3 -c "import watchdog; import pdfplumber; print('OK')"
 ```
 
 **Verificar configuração**:
@@ -495,7 +563,7 @@ ls -la /opt/nfse-renamer/files/reject/
 ls -la /opt/nfse-renamer/files/inbound/
 ```
 
-**Nota**: Se `RENAME_IN_PLACE="true"`, arquivos processados e com erro permanecem em `/inbound/`.
+**Nota**: Se `RENAME_IN_PLACE="true"`, apenas arquivos processados com sucesso permanecem em `/inbound/`. Arquivos com erro são movidos para `/reject/`.
 
 ### ❗ Regex não encontrou campos
 
@@ -527,8 +595,10 @@ Editar `/etc/systemd/system/nfse-renamer.service` e ajustar `StartLimitInterval`
 - Verificar se arquivo está sendo usado por outro processo: `lsof /opt/nfse-renamer/files/inbound/arquivo.pdf`
 
 **Se `RENAME_IN_PLACE="true"`**:
-- Arquivos devem permanecer em `/inbound/` após processamento (comportamento esperado)
-- Verificar se arquivo foi renomeado corretamente
+- Arquivos processados com sucesso permanecem em `/inbound/` (renomeados)
+- Arquivos com erro são movidos para `/reject/` (mesmo comportamento do modo padrão)
+- Verificar se arquivo foi renomeado corretamente em `/inbound/`
+- Verificar se arquivo com erro foi movido para `/reject/`
 - Consultar logs para verificar se houve erro no processamento
 
 ## ✔️ 12. Roadmap Futuro
