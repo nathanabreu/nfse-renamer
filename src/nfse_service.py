@@ -248,6 +248,76 @@ def should_process_file(filename):
     # Isso evita reprocessar arquivos já processados (que começam com "nfse" minúsculo)
     return filename.startswith("NFSE_")
 
+def check_if_file_was_processed(original_path):
+    """
+    Verifica se o arquivo foi processado procurando pelo arquivo renomeado.
+    Retorna o caminho do arquivo processado se encontrado, None caso contrário.
+    """
+    # Obtém informações do arquivo original antes de procurar
+    original_size = None
+    original_mtime = None
+    original_exists = os.path.exists(original_path)
+    
+    try:
+        if original_exists:
+            stat_info = os.stat(original_path)
+            original_size = stat_info.st_size
+            original_mtime = stat_info.st_mtime
+    except:
+        pass
+    
+    rename_in_place = CONFIG.get("RENAME_IN_PLACE", "false").lower() in ("true", "1", "yes")
+    original_dir = os.path.dirname(original_path)
+    
+    # Procura por arquivos processados
+    search_dirs = []
+    if rename_in_place:
+        # Em modo RENAME_IN_PLACE, procura na mesma pasta
+        search_dirs.append(original_dir)
+    else:
+        # Em modo normal, procura em OUTPUT_DIR
+        search_dirs.append(CONFIG.get("OUTPUT_DIR", "/opt/nfse-renamer/files/processed"))
+    
+    current_time = time.time()
+    
+    for search_dir in search_dirs:
+        if not os.path.exists(search_dir):
+            continue
+        
+        try:
+            # Procura por arquivos que começam com "nfse_" (minúsculo)
+            for file in os.listdir(search_dir):
+                if file.lower().startswith("nfse_") and file.lower().endswith(".pdf"):
+                    processed_path = os.path.join(search_dir, file)
+                    try:
+                        stat_info = os.stat(processed_path)
+                        file_mtime = stat_info.st_mtime
+                        file_size = stat_info.st_size
+                        
+                        # Se o arquivo original não existe mais, qualquer arquivo "nfse_" 
+                        # processado nos últimos 30 segundos pode ser o arquivo processado
+                        if not original_exists:
+                            if current_time - file_mtime < 30:
+                                # Arquivo processado recentemente e original não existe = provavelmente foi processado
+                                return processed_path
+                        else:
+                            # Se o arquivo original ainda existe, compara tamanho e data
+                            if original_size and original_mtime:
+                                size_diff = abs(file_size - original_size)
+                                time_diff = abs(file_mtime - original_mtime)
+                                
+                                # Tamanho deve ser muito similar (diferença < 1KB)
+                                # Data deve ser recente (últimos 10 segundos)
+                                if size_diff < 1024 and time_diff < 10:
+                                    # Arquivo encontrado - provavelmente foi processado
+                                    return processed_path
+                    except:
+                        continue
+        except Exception:
+            continue
+    
+    return None
+
 def process_pdf(path, retry_count=0):
     """
     Processa PDF com retry logic e tratamento robusto de erros
@@ -290,7 +360,15 @@ def process_pdf(path, retry_count=0):
         
         # Processamento com timeout simulado
         start_time = time.time()
-        new_name = extract_nfse_info(path)
+        try:
+            new_name = extract_nfse_info(path)
+        except Exception as extract_error:
+            # Log específico para erros durante extração
+            logging.error(f"Erro durante extração de informações: {path}")
+            logging.error(f"  Tipo: {type(extract_error).__name__}")
+            logging.error(f"  Mensagem: {str(extract_error)}")
+            # Relança a exceção para ser tratada no bloco except externo
+            raise
         elapsed = time.time() - start_time
         
         if elapsed > int(CONFIG["PROCESS_TIMEOUT"]):
@@ -352,44 +430,75 @@ def process_pdf(path, retry_count=0):
             PROCESSING_FILES.discard(file_id)
             return process_pdf(path, retry_count + 1)
         return False
-    except Exception as e:
+    except (Exception, BaseException) as e:
         # Log de erro com mais detalhes para diferentes tipos de erro
         error_type = type(e).__name__
         error_msg = str(e)
         
         # Log mais detalhado para erros de leitura de PDF
-        if "ValueError" in error_type and ("PDF não pode ser lido" in error_msg or "estrutura não padrão" in error_msg or "No /Root" in error_msg):
+        if "PdfminerException" in error_type or "PdfminerException" in error_msg or "No /Root" in error_msg:
+            logging.error(f"Erro do pdfminer ao ler PDF: {path}")
+            logging.error(f"  Detalhes: {error_msg}")
+            logging.error(f"  Verificando se arquivo foi processado antes do erro...")
+        elif "ValueError" in error_type and ("PDF não pode ser lido" in error_msg or "estrutura não padrão" in error_msg or "No /Root" in error_msg):
             logging.error(f"Erro ao ler PDF (estrutura não padrão): {path}")
             logging.error(f"  Detalhes: {error_msg}")
-            logging.error(f"  Sugestão: O PDF pode estar corrompido ou ter formato não suportado pelo pdfplumber")
+            logging.error(f"  Verificando se arquivo foi processado antes do erro...")
         elif "ValueError" in error_type and ("não encontrado" in error_msg or "não contém texto" in error_msg):
             logging.error(f"Erro ao extrair informações do PDF: {path}")
             logging.error(f"  Detalhes: {error_msg}")
-            logging.error(f"  Sugestão: O PDF pode não conter os campos esperados (CNPJ, RPS, NFSe, Série)")
+            logging.error(f"  Verificando se arquivo foi processado antes do erro...")
         else:
             logging.error(f"Erro processando {path}: {error_type}: {error_msg}")
+            logging.error(f"  Verificando se arquivo foi processado antes do erro...")
         
-        # Sempre move arquivos com erro para REJECT_DIR (mesmo em modo RENAME_IN_PLACE)
-        # Mas só se o arquivo ainda existir no caminho original
+        # PRIMEIRO: Verifica se o arquivo foi processado antes de mover para REJECT_DIR
+        # Isso é importante porque mesmo com erro, o arquivo pode ter sido renomeado/movido com sucesso
+        processed_file = check_if_file_was_processed(path)
+        if processed_file and os.path.exists(processed_file):
+            logging.info(f"Arquivo foi processado com sucesso antes do erro: {path} → {processed_file}")
+            logging.info(f"  Não movendo para REJECT_DIR pois o processamento foi bem-sucedido")
+            return True  # Considera como sucesso pois foi processado
+        
+        # Se o arquivo original não existe mais e não encontramos processado, pode ter sido processado
+        if not os.path.exists(path):
+            logging.warning(f"Arquivo não encontrado após erro - pode ter sido processado: {path}")
+            # Tenta uma busca mais ampla por arquivos processados recentes
+            rename_in_place = CONFIG.get("RENAME_IN_PLACE", "false").lower() in ("true", "1", "yes")
+            search_dir = os.path.dirname(path) if rename_in_place else CONFIG.get("OUTPUT_DIR", "/opt/nfse-renamer/files/processed")
+            if os.path.exists(search_dir):
+                try:
+                    # Procura por qualquer arquivo "nfse_" processado nos últimos 10 segundos
+                    current_time = time.time()
+                    for file in os.listdir(search_dir):
+                        if file.lower().startswith("nfse_") and file.lower().endswith(".pdf"):
+                            file_path = os.path.join(search_dir, file)
+                            try:
+                                if current_time - os.path.getmtime(file_path) < 10:
+                                    logging.info(f"Possível arquivo processado encontrado: {file_path}")
+                                    return True  # Assume que foi processado
+                            except:
+                                pass
+                except:
+                    pass
+            return False
+        
+        # Só move para REJECT_DIR se o arquivo ainda existir e não foi processado
         try:
-            if os.path.exists(path):
-                reject_path = os.path.join(CONFIG["REJECT_DIR"], os.path.basename(path))
-                # Evita sobrescrever arquivo existente em reject
-                if os.path.exists(reject_path):
-                    base_name = os.path.splitext(os.path.basename(path))[0]
-                    reject_path = os.path.join(
-                        CONFIG["REJECT_DIR"], 
-                        f"{base_name}_{int(time.time())}.pdf"
-                    )
-                shutil.move(path, reject_path)
-                
-                # Ajusta permissões do arquivo rejeitado
-                set_file_permissions(reject_path)
-                
-                logging.error(f"Arquivo movido para REJECT: {reject_path}")
-            else:
-                # Arquivo não existe mais - pode ter sido processado antes do erro
-                logging.warning(f"Arquivo não encontrado após erro - pode ter sido processado antes da falha: {path}")
+            reject_path = os.path.join(CONFIG["REJECT_DIR"], os.path.basename(path))
+            # Evita sobrescrever arquivo existente em reject
+            if os.path.exists(reject_path):
+                base_name = os.path.splitext(os.path.basename(path))[0]
+                reject_path = os.path.join(
+                    CONFIG["REJECT_DIR"], 
+                    f"{base_name}_{int(time.time())}.pdf"
+                )
+            shutil.move(path, reject_path)
+            
+            # Ajusta permissões do arquivo rejeitado
+            set_file_permissions(reject_path)
+            
+            logging.error(f"Arquivo movido para REJECT: {reject_path}")
         except Exception as move_error:
             logging.error(f"Erro ao mover para REJECT: {move_error}")
         

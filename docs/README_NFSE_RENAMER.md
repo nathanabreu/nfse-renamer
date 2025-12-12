@@ -36,18 +36,18 @@ A solução é composta por quatro módulos principais:
 1. **Monitoramento de Diretório** (Watchdog ou Polling)
 
    - **Modo Watchdog (padrão)**: Monitoramento contínuo via biblioteca watchdog/inotify. Dispara processamento imediatamente ao detectar criação de novos PDFs. Mais eficiente e responsivo.
-   
+
    - **Modo Polling**: Verifica o diretório em intervalos configuráveis. Útil quando inotify não está disponível ou para ambientes com restrições específicas. Frequência configurável via `POLLING_INTERVAL`.
 
 2. **Extractor NFSe**
 
-   Módulo dedicado à extração estruturada dos campos:
+Módulo dedicado à extração estruturada dos campos:
    - CNPJ Emitente
    - RPS (Número)
    - Série
    - NFSe (Número da Nota)
-   
-   Usa regex, normalização e leitura via pdfplumber.
+
+Usa regex, normalização e leitura via pdfplumber.
 
 3. **Dispatcher com Retry Logic**
 
@@ -248,7 +248,7 @@ journalctl -u nfse-renamer --since today
 
 5. **Geração do novo nome**:
    ```
-   nfse_<cnpj>_<rps>_<nfse>_<serie>.pdf
+nfse_<cnpj>_<rps>_<nfse>_<serie>.pdf
    ```
 
 6. **Renomeação/Movimentação**:

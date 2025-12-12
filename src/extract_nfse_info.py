@@ -1,6 +1,14 @@
 import re
 import pdfplumber
 
+# Tenta importar PdfminerException se disponível
+try:
+    from pdfplumber.utils.exceptions import PdfminerException
+except ImportError:
+    # Se não disponível, cria uma classe dummy para verificação
+    class PdfminerException(Exception):
+        pass
+
 REGEX_CNPJ = r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b"
 REGEX_NFSE = r"(?i)Número da Nota\s*[\r\n ]*([0-9]{1,10})"
 REGEX_RPS = r"RPS Nº\s*([0-9]+)"
@@ -14,6 +22,9 @@ def extract_nfse_info(pdf_path):
     try:
         with pdfplumber.open(pdf_path) as pdf:
             full_text = "\n".join([p.extract_text() or "" for p in pdf.pages])
+    except PdfminerException as e:
+        # Propaga PdfminerException diretamente para melhor tratamento no código chamador
+        raise
     except Exception as e:
         error_msg = str(e)
         error_type = type(e).__name__
@@ -22,7 +33,8 @@ def extract_nfse_info(pdf_path):
         if "No /Root object" in error_msg or "/Root" in error_msg or "Root" in error_msg:
             raise ValueError(f"PDF não pode ser lido pelo pdfplumber (estrutura não padrão): {error_msg}. O PDF pode estar corrompido ou ter formato não suportado.")
         elif "PdfminerException" in error_type or "pdfminer" in error_msg.lower():
-            raise ValueError(f"Erro do pdfminer ao ler PDF: {error_msg}")
+            # Se for PdfminerException mas não foi capturado acima, propaga como PdfminerException
+            raise PdfminerException(error_msg)
         else:
             raise ValueError(f"Erro ao abrir PDF: {error_type}: {error_msg}")
 
