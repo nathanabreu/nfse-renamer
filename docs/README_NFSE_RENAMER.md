@@ -129,6 +129,130 @@ O script irá:
 - Configurar e iniciar o serviço systemd
 - Verificar se tudo está funcionando
 
+### Instalação em Red Hat Enterprise Linux 9.6
+
+O serviço é totalmente compatível com RHEL 9.6. Siga os passos abaixo:
+
+**Pré-requisitos**:
+
+1. **Instalar Python 3 e pip3** (se não estiverem instalados):
+```bash
+sudo dnf install -y python3 python3-pip
+```
+
+2. **(Opcional) Instalar dependências do sistema para pdfplumber**:
+   
+   Se você encontrar erros ao processar PDFs, pode ser necessário instalar bibliotecas do sistema:
+```bash
+sudo dnf install -y poppler poppler-utils poppler-cpp-devel
+```
+
+3. **Executar instalação automática**:
+```bash
+sudo ./scripts/install.sh
+```
+
+**Notas importantes para RHEL 9.6**:
+
+- ✅ O script de instalação já trata automaticamente o erro "externally-managed-environment" usando `--break-system-packages`
+- ✅ O RHEL 9.6 inclui Python 3.9+ por padrão, totalmente compatível
+- ✅ O systemd está disponível e configurado corretamente
+- ✅ Todas as bibliotecas Python padrão (`ftplib`, `os`, `shutil`, etc.) estão disponíveis
+
+**Verificações antes da instalação**:
+
+```bash
+# Verificar versão do Python (deve ser 3.9+)
+python3 --version
+
+# Verificar se pip3 está disponível
+pip3 --version
+
+# Se pip3 não estiver instalado:
+sudo dnf install -y python3-pip
+```
+
+**Após a instalação**:
+
+```bash
+# Verificar status do serviço
+systemctl status nfse-renamer
+
+# Ver logs
+journalctl -u nfse-renamer -f
+```
+
+### Instalação em Ambiente com Proxy
+
+Se o servidor estiver em ambiente com proxy corporativo, o `pip3` precisa de configuração para baixar pacotes do PyPI durante a instalação.
+
+**⚠️ Importante**: O serviço em execução **não precisa de proxy** (exceto para FTP, se configurado). O proxy é necessário apenas durante a instalação para baixar as dependências Python.
+
+**Opção 1 - Variáveis de ambiente (recomendado)**:
+
+Os scripts de instalação detectam automaticamente variáveis de proxy. Configure antes de executar:
+
+```bash
+# Configurar proxy HTTP/HTTPS
+export http_proxy="http://proxy.empresa.com:8080"
+export https_proxy="http://proxy.empresa.com:8080"
+export HTTP_PROXY="http://proxy.empresa.com:8080"
+export HTTPS_PROXY="http://proxy.empresa.com:8080"
+
+# Se o proxy requer autenticação:
+export http_proxy="http://usuario:senha@proxy.empresa.com:8080"
+export https_proxy="http://usuario:senha@proxy.empresa.com:8080"
+
+# Executar instalação (sudo -E preserva variáveis de ambiente)
+sudo -E ./scripts/install.sh
+```
+
+**Opção 2 - Configurar pip.conf**:
+
+```bash
+# Criar diretório de configuração do pip
+sudo mkdir -p /etc/pip
+
+# Criar arquivo de configuração
+sudo tee /etc/pip/pip.conf > /dev/null <<EOF
+[global]
+proxy = http://proxy.empresa.com:8080
+# Se precisar de autenticação:
+# proxy = http://usuario:senha@proxy.empresa.com:8080
+EOF
+
+# Executar instalação
+sudo ./scripts/install.sh
+```
+
+**Opção 3 - Instalar dependências manualmente**:
+
+```bash
+# Configurar proxy
+export http_proxy="http://proxy.empresa.com:8080"
+export https_proxy="http://proxy.empresa.com:8080"
+
+# Instalar dependências manualmente
+sudo pip3 install --break-system-packages --proxy http://proxy.empresa.com:8080 watchdog pdfplumber
+
+# Depois executar o script de instalação (pulará a instalação de dependências)
+sudo ./scripts/install.sh
+```
+
+**Verificar se proxy está funcionando**:
+
+```bash
+# Testar acesso ao PyPI através do proxy
+pip3 install --proxy http://proxy.empresa.com:8080 --dry-run watchdog
+```
+
+**Notas importantes**:
+
+- ✅ Os scripts `install.sh` e `run_local.sh` detectam automaticamente variáveis `http_proxy`, `https_proxy`, `HTTP_PROXY` e `HTTPS_PROXY`
+- ✅ O serviço em execução **não faz requisições HTTP/HTTPS** - apenas processa arquivos localmente
+- ✅ Se usar FTP (`USE_FTP="true"`), o FTP não usa proxy HTTP por padrão. Se o servidor FTP precisar passar por proxy, pode ser necessário configuração adicional no sistema ou uso de proxy FTP específico
+- ✅ O proxy é necessário apenas durante a instalação para baixar `watchdog` e `pdfplumber` do PyPI
+
 ### Instalação Manual
 
 1. Criar diretório base

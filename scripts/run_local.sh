@@ -16,10 +16,24 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Detectar configuração de proxy
+PIP_PROXY=""
+if [ -n "$http_proxy" ] || [ -n "$HTTP_PROXY" ]; then
+    PIP_PROXY="${http_proxy:-$HTTP_PROXY}"
+elif [ -n "$https_proxy" ] || [ -n "$HTTPS_PROXY" ]; then
+    PIP_PROXY="${https_proxy:-$HTTPS_PROXY}"
+fi
+
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}NFSe Renamer Service - Execução Local${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
+
+# Informar sobre proxy se detectado
+if [ -n "$PIP_PROXY" ]; then
+    echo -e "${YELLOW}ℹ Proxy detectado: $PIP_PROXY${NC}"
+    echo ""
+fi
 
 # Verificar se está no diretório correto
 if [ ! -d "$PROJECT_DIR/src" ]; then
@@ -38,7 +52,15 @@ fi
 echo -e "${YELLOW}Verificando dependências...${NC}"
 if ! python3 -c "import watchdog" 2>/dev/null; then
     echo -e "${YELLOW}  watchdog não encontrado, instalando...${NC}"
-    if pip3 install watchdog 2>/dev/null || pip3 install --break-system-packages watchdog 2>/dev/null; then
+    if [ -n "$PIP_PROXY" ]; then
+        PIP_CMD="pip3 install --proxy $PIP_PROXY"
+        PIP_CMD_BREAK="pip3 install --break-system-packages --proxy $PIP_PROXY"
+    else
+        PIP_CMD="pip3 install"
+        PIP_CMD_BREAK="pip3 install --break-system-packages"
+    fi
+    
+    if $PIP_CMD watchdog 2>/dev/null || $PIP_CMD_BREAK watchdog 2>/dev/null; then
         echo -e "${GREEN}  ✓ watchdog instalado${NC}"
     else
         echo -e "${RED}ERRO: Falha ao instalar watchdog${NC}"
@@ -48,7 +70,15 @@ fi
 
 if ! python3 -c "import pdfplumber" 2>/dev/null; then
     echo -e "${YELLOW}  pdfplumber não encontrado, instalando...${NC}"
-    if pip3 install pdfplumber 2>/dev/null || pip3 install --break-system-packages pdfplumber 2>/dev/null; then
+    if [ -n "$PIP_PROXY" ]; then
+        PIP_CMD="pip3 install --proxy $PIP_PROXY"
+        PIP_CMD_BREAK="pip3 install --break-system-packages --proxy $PIP_PROXY"
+    else
+        PIP_CMD="pip3 install"
+        PIP_CMD_BREAK="pip3 install --break-system-packages"
+    fi
+    
+    if $PIP_CMD pdfplumber 2>/dev/null || $PIP_CMD_BREAK pdfplumber 2>/dev/null; then
         echo -e "${GREEN}  ✓ pdfplumber instalado${NC}"
     else
         echo -e "${RED}ERRO: Falha ao instalar pdfplumber${NC}"

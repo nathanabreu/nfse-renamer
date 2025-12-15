@@ -23,10 +23,24 @@ fi
 INSTALL_DIR="/opt/nfse-renamer"
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Detectar configuração de proxy
+PIP_PROXY=""
+if [ -n "$http_proxy" ] || [ -n "$HTTP_PROXY" ]; then
+    PIP_PROXY="${http_proxy:-$HTTP_PROXY}"
+elif [ -n "$https_proxy" ] || [ -n "$HTTPS_PROXY" ]; then
+    PIP_PROXY="${https_proxy:-$HTTPS_PROXY}"
+fi
+
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}NFSe Renamer Service - Instalação${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
+
+# Informar sobre proxy se detectado
+if [ -n "$PIP_PROXY" ]; then
+    echo -e "${YELLOW}ℹ Proxy detectado: $PIP_PROXY${NC}"
+    echo ""
+fi
 
 # 1. Verificar se o diretório de instalação existe
 if [ ! -d "$CURRENT_DIR" ]; then
@@ -67,17 +81,39 @@ echo -e "${GREEN}✓ Permissões ajustadas${NC}"
 # 5. Instalar dependências Python
 echo -e "${YELLOW}[4/6] Instalando dependências Python...${NC}"
 if command -v pip3 &> /dev/null; then
+    # Preparar comando pip3 com proxy se necessário
+    PIP_CMD="pip3 install"
+    if [ -n "$PIP_PROXY" ]; then
+        PIP_CMD="pip3 install --proxy $PIP_PROXY"
+        echo -e "${YELLOW}  Usando proxy: $PIP_PROXY${NC}"
+    fi
+    
     # Tentar instalação normal primeiro
-    if pip3 install watchdog pdfplumber 2>/dev/null; then
+    if $PIP_CMD watchdog pdfplumber 2>/dev/null; then
         echo -e "${GREEN}✓ Dependências instaladas${NC}"
     else
         # Se falhar, tentar com --break-system-packages
         echo -e "${YELLOW}  Tentando com --break-system-packages...${NC}"
-        if pip3 install --break-system-packages watchdog pdfplumber; then
+        if [ -n "$PIP_PROXY" ]; then
+            PIP_CMD="pip3 install --break-system-packages --proxy $PIP_PROXY"
+        else
+            PIP_CMD="pip3 install --break-system-packages"
+        fi
+        
+        if $PIP_CMD watchdog pdfplumber; then
             echo -e "${GREEN}✓ Dependências instaladas${NC}"
         else
             echo -e "${RED}ERRO: Falha ao instalar dependências${NC}"
-            echo "  Tente manualmente: pip3 install --break-system-packages watchdog pdfplumber"
+            if [ -n "$PIP_PROXY" ]; then
+                echo "  Tente manualmente: pip3 install --break-system-packages --proxy $PIP_PROXY watchdog pdfplumber"
+            else
+                echo "  Tente manualmente: pip3 install --break-system-packages watchdog pdfplumber"
+            fi
+            echo ""
+            echo -e "${YELLOW}  Dica: Se estiver em ambiente com proxy, configure as variáveis:${NC}"
+            echo "    export http_proxy='http://proxy.empresa.com:8080'"
+            echo "    export https_proxy='http://proxy.empresa.com:8080'"
+            echo "    sudo -E $0"
             exit 1
         fi
     fi
