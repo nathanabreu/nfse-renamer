@@ -26,6 +26,7 @@ O serviço oferece dois modos principais de funcionamento:
 2. **Modo de Processamento**:
    - **Movimentação** (padrão): Move arquivos para pastas `processed` ou `reject`
    - **Renomear no lugar**: Renomeia arquivos na própria pasta `inbound` sem mover
+   - **Upload FTP**: Envia arquivos processados para servidor FTP (opcional, pode combinar com outros modos)
 
 Consulte a seção [Configuração Parametrizada](#-5-configuração-parametrizada-configenv) para detalhes sobre como configurar cada modo.
 
@@ -51,13 +52,18 @@ Usa regex, normalização e leitura via pdfplumber.
 
 3. **Dispatcher com Retry Logic**
 
-   Gerencia a movimentação/renomeação de arquivos:
+   Gerencia a movimentação/renomeação de arquivos e upload FTP:
    - **Modo padrão** (`RENAME_IN_PLACE="false"`):
-     - `/processed` → sucesso
+     - `/processed` → sucesso (ou FTP se `USE_FTP="true"`)
      - `/reject` → erro de leitura/extração após todas as tentativas
    - **Modo renomear no lugar** (`RENAME_IN_PLACE="true"`):
      - Arquivo é renomeado na própria pasta INPUT_DIR (sucesso)
+     - Se `USE_FTP="true"`, também envia para FTP
      - Em caso de erro, arquivo é movido para REJECT_DIR
+   - **Modo FTP** (`USE_FTP="true"`):
+     - Arquivos processados são enviados para servidor FTP
+     - Suporta FTP anônimo e autenticado (com ou sem TLS)
+     - Fallback automático para OUTPUT_DIR em caso de falha
    
    Inclui sistema robusto de retry, validação de arquivos e tratamento de erros.
 
@@ -251,13 +257,18 @@ journalctl -u nfse-renamer --since today
 nfse_<cnpj>_<rps>_<nfse>_<serie>.pdf
    ```
 
-6. **Renomeação/Movimentação**:
+6. **Renomeação/Movimentação/Upload**:
    - **Modo padrão** (`RENAME_IN_PLACE="false"`):
-     - `/processed` → sucesso
+     - `/processed` → sucesso (ou FTP se `USE_FTP="true"`)
      - `/reject` → falha após todas as tentativas (log detalhado gerado)
    - **Modo renomear no lugar** (`RENAME_IN_PLACE="true"`):
      - Arquivo é renomeado na própria pasta `/inbound` (sucesso)
+     - Se `USE_FTP="true"`, também envia para FTP
      - Em caso de erro, arquivo é movido para `/reject`
+   - **Modo FTP** (`USE_FTP="true"`):
+     - Arquivo processado é enviado para servidor FTP
+     - Arquivo local é removido após upload bem-sucedido (se `RENAME_IN_PLACE="false"`)
+     - Em caso de falha no upload, fallback para OUTPUT_DIR (se `RENAME_IN_PLACE="false"`)
 
 ### Características de Robustez
 
@@ -343,6 +354,84 @@ RENAME_IN_PLACE="false"
 - Útil quando você quer manter arquivos processados na mesma pasta, apenas renomeados
 - **Importante**: Arquivos com erro são sempre movidos para REJECT_DIR, independente do modo
 - Exemplo de sucesso: `nota.pdf` → `nfse_02886427002450_146345_8_1.pdf` (na mesma pasta INPUT_DIR)
+
+### Upload para FTP
+
+```bash
+# Usar FTP como destino (true/false)
+# Quando true, arquivos processados são enviados para FTP em vez de OUTPUT_DIR
+USE_FTP="false"
+
+# Configurações FTP (apenas quando USE_FTP=true)
+# FTP_HOST é obrigatório. FTP_USER e FTP_PASSWORD são opcionais (vazio = anônimo)
+FTP_HOST=""
+FTP_PORT="21"
+FTP_USER=""
+FTP_PASSWORD=""
+FTP_PATH="/"
+FTP_PASSIVE="true"
+FTP_TIMEOUT="30"
+FTP_USE_TLS="false"
+```
+
+**Explicação**:
+- `USE_FTP`: Se `true`, arquivos processados são enviados para servidor FTP em vez de serem movidos para OUTPUT_DIR
+- `FTP_HOST`: Endereço do servidor FTP (obrigatório quando USE_FTP="true")
+- `FTP_PORT`: Porta do servidor FTP (padrão: 21)
+- `FTP_USER`: Usuário para autenticação (opcional - vazio = login anônimo)
+- `FTP_PASSWORD`: Senha para autenticação (opcional - vazio = login anônimo)
+- `FTP_PATH`: Caminho remoto no servidor FTP onde os arquivos serão enviados (padrão: "/")
+- `FTP_PASSIVE`: Modo passivo FTP (recomendado para firewalls, padrão: true)
+- `FTP_TIMEOUT`: Timeout da conexão FTP em segundos (padrão: 30)
+- `FTP_USE_TLS`: Usar FTP com TLS/SSL (FTPS) para conexão segura (padrão: false)
+
+**Comportamento com FTP**:
+
+1. **Modo padrão com FTP** (`RENAME_IN_PLACE="false"` e `USE_FTP="true"`):
+   - Arquivo processado com sucesso → enviado para FTP e removido localmente
+   - Se upload FTP falhar → arquivo é movido para OUTPUT_DIR como fallback
+   - Arquivo com erro → movido para REJECT_DIR (não é enviado para FTP)
+
+2. **Modo renomear no lugar com FTP** (`RENAME_IN_PLACE="true"` e `USE_FTP="true"`):
+   - Arquivo processado com sucesso → renomeado localmente E enviado para FTP
+   - Se upload FTP falhar → arquivo permanece renomeado localmente (processamento considerado sucesso)
+   - Arquivo com erro → movido para REJECT_DIR (não é enviado para FTP)
+
+3. **FTP Anônimo vs Autenticado**:
+   - **Anônimo**: Deixe `FTP_USER=""` e `FTP_PASSWORD=""` vazios
+   - **Autenticado**: Preencha `FTP_USER` e `FTP_PASSWORD` com as credenciais
+
+**Exemplo de configuração FTP anônimo**:
+```bash
+USE_FTP="true"
+FTP_HOST="ftp.exemplo.com"
+FTP_PORT="21"
+FTP_USER=""
+FTP_PASSWORD=""
+FTP_PATH="/public/uploads"
+FTP_PASSIVE="true"
+FTP_TIMEOUT="30"
+FTP_USE_TLS="false"
+```
+
+**Exemplo de configuração FTP autenticado com TLS**:
+```bash
+USE_FTP="true"
+FTP_HOST="ftp.exemplo.com"
+FTP_PORT="21"
+FTP_USER="usuario"
+FTP_PASSWORD="senha_segura"
+FTP_PATH="/uploads/nfse"
+FTP_PASSIVE="true"
+FTP_TIMEOUT="30"
+FTP_USE_TLS="true"
+```
+
+**Notas importantes**:
+- O serviço cria automaticamente o diretório remoto (`FTP_PATH`) se não existir
+- Arquivos são enviados com o nome padronizado (ex: `nfse_02886427002450_146345_8_1.pdf`)
+- Em caso de falha no upload FTP, o serviço tenta fallback para OUTPUT_DIR (se `RENAME_IN_PLACE="false"`)
+- A senha FTP é armazenada em texto no `config.env` - proteja o arquivo com permissões adequadas (`chmod 600 config.env`)
 
 **Permissões e Movimentação de Arquivos**:
 - ✅ **O serviço consegue mover e renomear PDFs**: O serviço roda como `root` (configurado no systemd), então tem todas as permissões necessárias para mover arquivos, independentemente das permissões do arquivo ou diretório

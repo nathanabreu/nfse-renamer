@@ -10,6 +10,8 @@ import sys
 import stat
 import time
 from time import sleep
+import ftplib
+from ftplib import FTP, FTP_TLS
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from .extract_nfse_info import extract_nfse_info
@@ -45,6 +47,15 @@ def load_config():
     CONFIG.setdefault("DIR_PERMISSIONS", "755")  # permissões de diretórios em octal
     CONFIG.setdefault("FIX_PERMISSIONS_ON_CYCLE", "true")  # ajustar permissões a cada ciclo
     CONFIG.setdefault("RENAME_IN_PLACE", "false")  # renomear na própria pasta
+    CONFIG.setdefault("USE_FTP", "false")  # usar FTP como destino
+    CONFIG.setdefault("FTP_HOST", "")
+    CONFIG.setdefault("FTP_PORT", "21")
+    CONFIG.setdefault("FTP_USER", "")
+    CONFIG.setdefault("FTP_PASSWORD", "")
+    CONFIG.setdefault("FTP_PATH", "/")
+    CONFIG.setdefault("FTP_PASSIVE", "true")
+    CONFIG.setdefault("FTP_TIMEOUT", "30")
+    CONFIG.setdefault("FTP_USE_TLS", "false")
     
     # Verifica modo RENAME_IN_PLACE
     rename_in_place = CONFIG.get("RENAME_IN_PLACE", "false").lower() in ("true", "1", "yes")
@@ -236,6 +247,94 @@ def fix_all_permissions():
         if os.path.exists(CONFIG["INPUT_DIR"]):
             fix_permissions_in_directory(CONFIG["INPUT_DIR"])
 
+def upload_to_ftp(local_file_path, remote_filename):
+    """
+    Faz upload de arquivo para servidor FTP.
+    Suporta FTP anônimo (sem user/password) e autenticado.
+    Retorna True se bem-sucedido, False caso contrário.
+    """
+    try:
+        ftp_host = CONFIG.get("FTP_HOST", "").strip()
+        ftp_port = int(CONFIG.get("FTP_PORT", "21"))
+        ftp_user = CONFIG.get("FTP_USER", "").strip()
+        ftp_password = CONFIG.get("FTP_PASSWORD", "").strip()
+        ftp_path = CONFIG.get("FTP_PATH", "/").strip()
+        ftp_passive = CONFIG.get("FTP_PASSIVE", "true").lower() in ("true", "1", "yes")
+        ftp_timeout = int(CONFIG.get("FTP_TIMEOUT", "30"))
+        use_tls = CONFIG.get("FTP_USE_TLS", "false").lower() in ("true", "1", "yes")
+        
+        if not ftp_host:
+            logging.error("FTP_HOST não configurado")
+            return False
+        
+        # Conecta ao servidor FTP
+        if use_tls:
+            ftp = FTP_TLS()
+            ftp.connect(ftp_host, ftp_port, timeout=ftp_timeout)
+            # Login: usa credenciais se fornecidas, senão tenta anônimo
+            if ftp_user:
+                ftp.login(ftp_user, ftp_password)
+            else:
+                ftp.login()  # Login anônimo
+            ftp.prot_p()  # Protege a conexão de dados
+        else:
+            ftp = FTP()
+            ftp.connect(ftp_host, ftp_port, timeout=ftp_timeout)
+            # Login: usa credenciais se fornecidas, senão tenta anônimo
+            if ftp_user:
+                ftp.login(ftp_user, ftp_password)
+            else:
+                ftp.login()  # Login anônimo
+        
+        # Configura modo passivo
+        if ftp_passive:
+            ftp.set_pasv(True)
+        
+        # Navega para o diretório remoto (cria se não existir)
+        if ftp_path and ftp_path != "/":
+            try:
+                ftp.cwd(ftp_path)
+            except ftplib.error_perm:
+                # Tenta criar o diretório
+                try:
+                    # Divide o caminho em partes e cria recursivamente
+                    path_parts = ftp_path.strip("/").split("/")
+                    current_path = ""
+                    for part in path_parts:
+                        if part:
+                            current_path = current_path + "/" + part if current_path else part
+                            try:
+                                ftp.cwd(current_path)
+                            except ftplib.error_perm:
+                                try:
+                                    ftp.mkd(current_path)
+                                    ftp.cwd(current_path)
+                                except:
+                                    pass
+                except:
+                    logging.warning(f"Não foi possível criar/acessar diretório FTP: {ftp_path}")
+        
+        # Faz upload do arquivo
+        with open(local_file_path, 'rb') as file:
+            ftp.storbinary(f'STOR {remote_filename}', file)
+        
+        ftp.quit()
+        
+        # Log informativo sobre tipo de conexão
+        auth_type = "autenticado" if ftp_user else "anônimo"
+        logging.info(f"Arquivo enviado para FTP ({auth_type}): {ftp_host}{ftp_path}/{remote_filename}")
+        return True
+        
+    except ftplib.error_perm as e:
+        logging.error(f"Erro de permissão FTP: {e}")
+        return False
+    except ftplib.error_temp as e:
+        logging.error(f"Erro temporário FTP: {e}")
+        return False
+    except Exception as e:
+        logging.error(f"Erro ao fazer upload FTP: {type(e).__name__}: {e}")
+        return False
+
 def should_process_file(filename):
     """
     Verifica se o arquivo deve ser processado.
@@ -381,6 +480,7 @@ def process_pdf(path, retry_count=0):
         
         # Verifica se deve renomear no lugar ou mover
         rename_in_place = CONFIG.get("RENAME_IN_PLACE", "false").lower() in ("true", "1", "yes")
+        use_ftp = CONFIG.get("USE_FTP", "false").lower() in ("true", "1", "yes")
         
         if rename_in_place:
             # Renomeia na própria pasta INPUT_DIR
@@ -400,6 +500,37 @@ def process_pdf(path, retry_count=0):
             set_file_permissions(destino)
             
             logging.info(f"Arquivo renomeado com sucesso → {destino}")
+            
+            # Se FTP estiver habilitado, também faz upload
+            if use_ftp:
+                remote_filename = os.path.basename(destino)
+                if upload_to_ftp(destino, remote_filename):
+                    logging.info(f"Arquivo também enviado para FTP: {remote_filename}")
+                else:
+                    logging.warning(f"Falha ao enviar para FTP, mas arquivo local foi processado: {destino}")
+        
+        elif use_ftp:
+            # Modo FTP: faz upload e remove arquivo local após sucesso
+            remote_filename = new_name + ".pdf"
+            
+            if upload_to_ftp(path, remote_filename):
+                # Remove arquivo local após upload bem-sucedido
+                try:
+                    os.remove(path)
+                    logging.info(f"Arquivo enviado para FTP e removido localmente: {remote_filename}")
+                except Exception as e:
+                    logging.warning(f"Arquivo enviado para FTP, mas erro ao remover local: {e}")
+            else:
+                # Se falhar, move para OUTPUT_DIR como fallback
+                logging.warning(f"Falha no upload FTP, movendo para OUTPUT_DIR como fallback")
+                destino = os.path.join(CONFIG["OUTPUT_DIR"], new_name + ".pdf")
+                if os.path.exists(destino):
+                    base_name = new_name + "_" + str(int(time.time()))
+                    destino = os.path.join(CONFIG["OUTPUT_DIR"], base_name + ".pdf")
+                shutil.move(path, destino)
+                set_file_permissions(destino)
+                logging.info(f"Arquivo movido para OUTPUT_DIR: {destino}")
+        
         else:
             # Comportamento padrão: move para OUTPUT_DIR
             destino = os.path.join(CONFIG["OUTPUT_DIR"], new_name + ".pdf")
