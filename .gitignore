@@ -1,0 +1,12 @@
+# Ignorar pacotes de deploy gerados
+deploy/
+*.zip
+
+# Ignorar artefatos Python
+__pycache__/
+*.pyc
+
+# Ignorar logs locais
+logs/
+*.log
+
