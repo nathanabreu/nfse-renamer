@@ -573,7 +573,9 @@ Campo	Regex
 CNPJ do Emitente	\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b
 Número da Nota (NFSe)	Número da Nota\s*([0-9]{1,10})
 RPS Número	RPS Nº\s*([0-9]+)
-Série	Série\s*([0-9]+)
+Série	(?i)Série\s*([A-Za-z0-9\-_]+)
+
+**Nota**: A série aceita letras, números, hífens e underscores (ex: "1", "A", "NF", "1-A", etc.).
 
 Essas regex foram testadas com PDFs reais da Prefeitura de Porto Alegre.
 

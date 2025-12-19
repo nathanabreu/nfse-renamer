@@ -12,7 +12,7 @@ except ImportError:
 REGEX_CNPJ = r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b"
 REGEX_NFSE = r"(?i)Número da Nota\s*[\r\n ]*([0-9]{1,10})"
 REGEX_RPS = r"RPS Nº\s*([0-9]+)"
-REGEX_SERIE = r"Série\s*([0-9]+)"
+REGEX_SERIE = r"(?i)Série\s*([A-Za-z0-9\-_]+)"
 
 def extract_nfse_info(pdf_path):
     """
