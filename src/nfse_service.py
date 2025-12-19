@@ -99,7 +99,7 @@ def load_config():
             raise
 
 def setup_logging():
-    """Configura sistema de logging"""
+    """Configura sistema de logging - sempre escreve no arquivo configurado"""
     # Garante que o diretório de logs existe
     log_dir = os.path.dirname(CONFIG["LOG_FILE"])
     if not os.path.exists(log_dir):
@@ -113,33 +113,56 @@ def setup_logging():
     root_logger = logging.getLogger()
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
+        handler.close()  # Fecha handlers antigos adequadamente
     
     # Configura formato
     log_format = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     
-    # Handler para arquivo
+    # Handler para arquivo - SEMPRE adicionado, mesmo quando rodando como systemd
     try:
         file_handler = logging.FileHandler(CONFIG["LOG_FILE"], mode='a', encoding='utf-8')
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(log_format)
+        # Força flush imediato para garantir que logs não sejam perdidos
+        file_handler.flush()
         root_logger.addHandler(file_handler)
         
         # Testa se consegue escrever no arquivo
         logging.info("=" * 60)
         logging.info("Sistema de logging inicializado")
+        logging.info(f"Logs serão salvos em: {CONFIG['LOG_FILE']}")
+        # Força flush após teste
+        file_handler.flush()
     except Exception as e:
         print(f"ERRO: Falha ao configurar arquivo de log {CONFIG['LOG_FILE']}: {e}")
         sys.exit(1)
     
-    # Handler para console (apenas quando não rodando como serviço systemd)
-    # O systemd já captura stdout/stderr, então não precisa duplicar
-    if sys.stdout.isatty():  # Só adiciona se for terminal interativo
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.INFO)
-        console_handler.setFormatter(log_format)
-        root_logger.addHandler(console_handler)
+    # Handler para console - adiciona também quando rodando como systemd
+    # Isso permite que logs apareçam no journal do systemd E no arquivo
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(log_format)
+    root_logger.addHandler(console_handler)
     
     root_logger.setLevel(logging.INFO)
+    
+    # Log adicional para confirmar que está funcionando
+    logging.info("Handler de arquivo configurado e ativo")
+    
+    # Força flush inicial
+    for handler in root_logger.handlers:
+        if hasattr(handler, 'flush'):
+            handler.flush()
+
+def flush_logs():
+    """Força flush de todos os handlers de log para garantir escrita no arquivo"""
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if hasattr(handler, 'flush'):
+            try:
+                handler.flush()
+            except Exception:
+                pass  # Ignora erros de flush
 
 def wait_for_file_ready(file_path, max_wait=10):
     """Aguarda arquivo estar completamente escrito e disponível"""
@@ -440,6 +463,22 @@ def process_pdf(path, retry_count=0):
             logging.debug(f"Ignorando arquivo não-PDF: {path}")
             return False
         
+        # IMPORTANTE: Não processa arquivos que estão em REJECT_DIR ou OUTPUT_DIR
+        # Isso evita processar arquivos que já foram rejeitados ou processados
+        if CONFIG["REJECT_DIR"] in path or path.startswith(CONFIG["REJECT_DIR"]):
+            logging.debug(f"Ignorando arquivo em REJECT_DIR: {path}")
+            return False
+        
+        if CONFIG["OUTPUT_DIR"] in path or path.startswith(CONFIG["OUTPUT_DIR"]):
+            logging.debug(f"Ignorando arquivo em OUTPUT_DIR: {path}")
+            return False
+        
+        # Verifica se o arquivo está em INPUT_DIR (pasta de entrada)
+        # Só processa arquivos que estão na pasta de entrada
+        if not path.startswith(CONFIG["INPUT_DIR"]):
+            logging.debug(f"Ignorando arquivo fora de INPUT_DIR: {path}")
+            return False
+        
         # Verifica se arquivo deve ser processado (apenas os que começam com "NFSE" em maiúsculo)
         filename = os.path.basename(path)
         if not should_process_file(filename):
@@ -614,7 +653,17 @@ def process_pdf(path, retry_count=0):
                     pass
             return False
         
-        # Só move para REJECT_DIR se o arquivo ainda existir e não foi processado
+        # Só move para REJECT_DIR se o arquivo ainda existir, não foi processado e está em INPUT_DIR
+        # Verifica novamente se o arquivo ainda existe e está na pasta correta antes de mover
+        if not os.path.exists(path):
+            logging.warning(f"Arquivo não existe mais, não será movido para REJECT: {path}")
+            return False
+        
+        # Verifica se o arquivo ainda está em INPUT_DIR (não foi movido por outro processo)
+        if not path.startswith(CONFIG["INPUT_DIR"]):
+            logging.warning(f"Arquivo não está mais em INPUT_DIR, não será movido para REJECT: {path}")
+            return False
+        
         try:
             reject_path = os.path.join(CONFIG["REJECT_DIR"], os.path.basename(path))
             # Evita sobrescrever arquivo existente em reject
@@ -624,12 +673,18 @@ def process_pdf(path, retry_count=0):
                     CONFIG["REJECT_DIR"], 
                     f"{base_name}_{int(time.time())}.pdf"
                 )
+            
+            # Move o arquivo para REJECT_DIR
             shutil.move(path, reject_path)
             
             # Ajusta permissões do arquivo rejeitado
             set_file_permissions(reject_path)
             
             logging.error(f"Arquivo movido para REJECT: {reject_path}")
+            logging.error(f"Arquivo rejeitado não será processado novamente")
+        except FileNotFoundError:
+            # Arquivo foi removido/movido por outro processo
+            logging.warning(f"Arquivo não encontrado ao tentar mover para REJECT (já foi movido?): {path}")
         except Exception as move_error:
             logging.error(f"Erro ao mover para REJECT: {move_error}")
         
@@ -644,23 +699,44 @@ class NFSeHandler(FileSystemEventHandler):
             return
         if not event.src_path.lower().endswith(".pdf"):
             return
+        
+        # IMPORTANTE: Só processa arquivos que estão em INPUT_DIR
+        # Ignora arquivos criados em outras pastas (REJECT_DIR, OUTPUT_DIR, etc)
+        if not event.src_path.startswith(CONFIG["INPUT_DIR"]):
+            logging.debug(f"Arquivo detectado fora de INPUT_DIR, ignorando: {event.src_path}")
+            return
+        
         # Processa apenas arquivos que começam com "NFSE" em maiúsculo
         filename = os.path.basename(event.src_path)
         if not should_process_file(filename):
+            logging.debug(f"Arquivo detectado mas ignorado (não começa com NFSE_): {filename}")
             return
+        
+        logging.info(f"Arquivo detectado pelo watchdog: {filename}")
         # Processa em thread separada para não bloquear
         process_pdf(event.src_path)
 
 def scan_directory():
     """Escaneia diretório em modo polling"""
+    logging.info(f"Verificando pasta: {CONFIG['INPUT_DIR']}")
     pdf_files = []
+    total_files = 0
     try:
         for file in os.listdir(CONFIG["INPUT_DIR"]):
             file_path = os.path.join(CONFIG["INPUT_DIR"], file)
-            if os.path.isfile(file_path) and should_process_file(file):
-                pdf_files.append(file_path)
+            if os.path.isfile(file_path):
+                total_files += 1
+                if should_process_file(file):
+                    pdf_files.append(file_path)
     except Exception as e:
         logging.error(f"Erro ao escanear diretório: {e}")
+        return
+    
+    # Log do resultado da verificação
+    if pdf_files:
+        logging.info(f"Verificação concluída: {len(pdf_files)} arquivo(s) para processar (total: {total_files} arquivo(s) na pasta)")
+    else:
+        logging.info(f"Verificação concluída: nenhum arquivo para processar (total: {total_files} arquivo(s) na pasta)")
     
     for pdf_path in pdf_files:
         process_pdf(pdf_path)
@@ -671,6 +747,7 @@ def scan_directory():
 def signal_handler(signum, frame):
     """Handler para sinais de sistema (SIGTERM, SIGINT)"""
     logging.info(f"Recebido sinal {signum}, encerrando serviço...")
+    flush_logs()  # Garante que logs finais sejam escritos
     sys.exit(0)
 
 def main():
@@ -728,11 +805,14 @@ def main():
         try:
             while True:
                 scan_directory()
+                flush_logs()  # Garante que logs sejam escritos no arquivo
                 sleep(polling_interval)
         except KeyboardInterrupt:
             logging.info("Serviço interrompido pelo usuário")
+            flush_logs()
         except Exception as e:
             logging.error(f"Erro fatal no serviço: {type(e).__name__}: {str(e)}")
+            flush_logs()
             sys.exit(1)
     else:
         # Modo watchdog (event-driven)
@@ -744,26 +824,59 @@ def main():
         
         try:
             last_permission_fix = time.time()
+            last_verification = time.time()
+            last_log_flush = time.time()
             permission_fix_interval = 300  # 5 minutos
+            verification_interval = 60  # 1 minuto - verifica pasta periodicamente
+            log_flush_interval = 10  # 10 segundos - força flush dos logs
             
             while True:
                 sleep(1)
+                current_time = time.time()
+                
+                # Força flush periódico dos logs para garantir escrita no arquivo
+                if current_time - last_log_flush >= log_flush_interval:
+                    flush_logs()
+                    last_log_flush = current_time
+                
+                # Verifica pasta periodicamente no modo watchdog (para logs)
+                if current_time - last_verification >= verification_interval:
+                    try:
+                        total_files = 0
+                        pdf_files = []
+                        for file in os.listdir(CONFIG["INPUT_DIR"]):
+                            file_path = os.path.join(CONFIG["INPUT_DIR"], file)
+                            if os.path.isfile(file_path):
+                                total_files += 1
+                                if should_process_file(file):
+                                    pdf_files.append(file_path)
+                        
+                        if pdf_files:
+                            logging.info(f"Verificação periódica: {len(pdf_files)} arquivo(s) para processar (total: {total_files} arquivo(s) na pasta {CONFIG['INPUT_DIR']})")
+                        else:
+                            logging.info(f"Verificação periódica: nenhum arquivo para processar (total: {total_files} arquivo(s) na pasta {CONFIG['INPUT_DIR']})")
+                    except Exception as e:
+                        logging.warning(f"Erro ao verificar pasta periodicamente: {e}")
+                    
+                    last_verification = current_time
                 
                 # Ajusta permissões periodicamente no modo watchdog
-                current_time = time.time()
                 if current_time - last_permission_fix >= permission_fix_interval:
                     fix_all_permissions()
                     last_permission_fix = current_time
         except KeyboardInterrupt:
             logging.info("Serviço interrompido pelo usuário")
+            flush_logs()
             observer.stop()
         except Exception as e:
             logging.error(f"Erro fatal no serviço: {type(e).__name__}: {str(e)}")
+            flush_logs()
             observer.stop()
             sys.exit(1)
         finally:
             observer.join()
             logging.info("Serviço NFSe Renamer encerrado")
+            flush_logs()  # Garante que logs finais sejam escritos
 
 if __name__ == "__main__":
     main()

@@ -1,13 +1,11 @@
 import re
 import pdfplumber
 
-# Tenta importar PdfminerException se disponível
-try:
-    from pdfplumber.utils.exceptions import PdfminerException
-except ImportError:
-    # Se não disponível, cria uma classe dummy para verificação
-    class PdfminerException(Exception):
-        pass
+# PdfminerException não está disponível diretamente no pdfplumber
+# Criamos uma classe dummy para verificação de tipo de erro
+class PdfminerException(Exception):
+    """Exceção do pdfminer para tratamento de erros específicos do PDF."""
+    pass
 
 REGEX_CNPJ = r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b"
 REGEX_NFSE = r"(?i)Número da Nota\s*[\r\n ]*([0-9]{1,10})"
