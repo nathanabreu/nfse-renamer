@@ -61,6 +61,11 @@ def extract_nfse_info(pdf_path):
         raise ValueError("Série não encontrada no PDF.")
     serie_num = serie.group(1)
 
+    # Regra especial: quando CNPJ for 02886427001306, série deve ser maiúscula
+    if cnpj == "02886427001306":
+        serie_num = serie_num.upper()
+        return f"nfse_{cnpj}_{rps_num}_{nfse_num}_{serie_num}".lower().rsplit('_', 1)[0] + '_' + serie_num
+    
     # Garante que o prefixo "nfse" seja sempre minúsculo
     return f"nfse_{cnpj}_{rps_num}_{nfse_num}_{serie_num}".lower()
 
